@@ -10,6 +10,7 @@ from src.xai_ids.benchmark import (
     bootstrap_mean_ci,
     nearest_neighbor_stability,
     safe_cosine,
+    split_validation,
 )
 from src.xai_ids.transparency import evidence_decision
 
@@ -84,6 +85,21 @@ class BenchmarkUnitTests(unittest.TestCase):
         self.assertEqual(mean, 0.25)
         self.assertEqual(low, 0.25)
         self.assertEqual(high, 0.25)
+
+    def test_validation_split_is_disjoint_stratified_and_deterministic(self):
+        labels = np.array([0] * 80 + [1] * 20)
+        fit_a, val_a = split_validation(labels, 0.15, seed=42)
+        fit_b, val_b = split_validation(labels, 0.15, seed=42)
+        np.testing.assert_array_equal(fit_a, fit_b)
+        np.testing.assert_array_equal(val_a, val_b)
+        self.assertEqual(len(np.intersect1d(fit_a, val_a)), 0)
+        self.assertEqual(len(fit_a) + len(val_a), len(labels))
+        self.assertEqual(int((labels[val_a] == 1).sum()), 3)
+
+    def test_validation_split_keeps_every_class_in_fit_partition(self):
+        labels = np.array([0] * 200 + [1] * 3 + [2] * 2)
+        fit, _ = split_validation(labels, 0.15, seed=42)
+        self.assertEqual(set(np.unique(labels[fit])), {0, 1, 2})
 
 
 if __name__ == "__main__":

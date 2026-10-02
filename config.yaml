@@ -28,6 +28,8 @@ models:
     learning_rate: 0.08
     subsample: 0.85
     colsample_bytree: 0.85
+tuning:
+  validation_size: 0.15
 evaluation:
   explanation_samples: 40
   lime_samples: 350

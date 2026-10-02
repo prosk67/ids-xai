@@ -300,6 +300,29 @@ def split_cic(
     )
 
 
+def split_validation(
+    labels: np.ndarray, size: float, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Carve a stratified validation subset from the training rows.
+
+    Every selection decision (hyperparameters, feature count, calibration)
+    uses this subset so the test partition never influences a choice. Classes
+    too small to stratify are kept entirely in the fit partition, which XGBoost
+    multiclass training requires.
+    """
+    from sklearn.model_selection import train_test_split
+
+    labels = np.asarray(labels)
+    indices = np.arange(len(labels))
+    classes, counts = np.unique(labels, return_counts=True)
+    rare = np.isin(labels, classes[counts < 3])
+    fit_idx, val_idx = train_test_split(
+        indices[~rare], test_size=size, random_state=seed, stratify=labels[~rare]
+    )
+    fit_idx = np.concatenate([fit_idx, indices[rare]])
+    return np.sort(fit_idx), np.sort(val_idx)
+
+
 def make_model(name: str, config: dict[str, Any], seed: int, n_classes: int):
     if name == "random_forest":
         return RandomForestClassifier(
