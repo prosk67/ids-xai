@@ -30,6 +30,16 @@ models:
     colsample_bytree: 0.85
 tuning:
   validation_size: 0.15
+  # Grids are deliberately small; the prespecified `models` settings are
+  # always the first candidate and win ties.
+  random_forest:
+    max_depth: [18, null]
+    min_samples_leaf: [1, 2]
+    max_features: [sqrt, 0.5]
+  xgboost:
+    n_estimators: [160, 400]
+    max_depth: [7, 10]
+    learning_rate: [0.08, 0.15]
 evaluation:
   explanation_samples: 40
   lime_samples: 350

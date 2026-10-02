@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import os
 import platform
@@ -323,16 +324,16 @@ def split_validation(
     return np.sort(fit_idx), np.sort(val_idx)
 
 
-def make_model(name: str, config: dict[str, Any], seed: int, n_classes: int):
+def make_model(name: str, params: dict[str, Any], seed: int, n_classes: int):
     if name == "random_forest":
         return RandomForestClassifier(
-            **config[name],
+            **params,
             class_weight="balanced_subsample",
             random_state=seed,
             n_jobs=-1,
         )
     if name == "xgboost":
-        params = dict(config[name])
+        params = dict(params)
         params.update(
             random_state=seed,
             n_jobs=max(1, min(8, os.cpu_count() or 1)),
@@ -341,6 +342,50 @@ def make_model(name: str, config: dict[str, Any], seed: int, n_classes: int):
         )
         return XGBClassifier(**params)
     raise KeyError(name)
+
+
+def candidate_params(base: dict[str, Any], grid: dict[str, list]) -> list[dict[str, Any]]:
+    """Return the prespecified configuration first, then distinct grid points."""
+    keys = sorted(grid)
+    candidates = [dict(base)]
+    for values in itertools.product(*(grid[key] for key in keys)):
+        candidate = {**base, **dict(zip(keys, values))}
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def select_hyperparameters(
+    model_name: str,
+    base: dict[str, Any],
+    grid: dict[str, list],
+    x_fit: np.ndarray,
+    y_fit: np.ndarray,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    seed: int,
+    n_classes: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Choose parameters by validation macro-F1; earlier candidates win ties."""
+    rows = []
+    best_score, best_params, best_number = -np.inf, dict(base), 0
+    for number, params in enumerate(candidate_params(base, grid)):
+        model = make_model(model_name, params, seed, n_classes)
+        weight = compute_sample_weight("balanced", y_fit) if model_name == "xgboost" else None
+        model.fit(x_fit, y_fit, sample_weight=weight)
+        score = float(f1_score(y_val, model.predict(x_val), average="macro", zero_division=0))
+        rows.append(
+            {
+                "candidate": number,
+                "validation_macro_f1": score,
+                **{f"param_{key}": value for key, value in params.items()},
+            }
+        )
+        if score > best_score:
+            best_score, best_params, best_number = score, params, number
+    for row in rows:
+        row["selected"] = int(row["candidate"] == best_number)
+    return best_params, rows
 
 
 def predictive_metrics(
@@ -804,7 +849,7 @@ def feature_ablation(
     dataset: str,
     task: str,
     model_name: str,
-    model_config: dict,
+    model_params: dict,
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_test: np.ndarray,
@@ -818,7 +863,7 @@ def feature_ablation(
     for k in [*k_values, len(feature_names)]:
         k_eff = min(k, len(feature_names))
         selected = ranking[:k_eff]
-        model = make_model(model_name, model_config, seed, len(np.unique(y_train)))
+        model = make_model(model_name, model_params, seed, len(np.unique(y_train)))
         sample_weight = (
             compute_sample_weight("balanced", y_train) if model_name == "xgboost" else None
         )
@@ -1046,6 +1091,8 @@ def run(config_path: Path) -> None:
     explanation_summaries: list[dict] = []
     ablation_rows: list[dict] = []
     dataset_metadata: dict[str, Any] = {}
+    tuning_rows: list[dict] = []
+    selected_hyperparameters: dict[str, dict[str, Any]] = {}
 
     for dataset in ("CIC-IDS2017", "UNSW-NB15"):
         for task in ("binary", "multiclass"):
@@ -1062,13 +1109,35 @@ def run(config_path: Path) -> None:
             for model_name in ("random_forest", "xgboost"):
                 frozen_model = None
                 frozen_prediction = None
+                # Hyperparameters are chosen on a validation split carved from
+                # training data; the final models still fit the full training set.
+                fit_idx, val_idx = split_validation(
+                    y_train, float(config["tuning"]["validation_size"]), seed
+                )
+                print(f"[tune] {dataset} / {task} / {model_name}", flush=True)
+                selected, tuning = select_hyperparameters(
+                    model_name,
+                    config["models"][model_name],
+                    config["tuning"].get(model_name, {}),
+                    x_train[fit_idx],
+                    y_train[fit_idx],
+                    x_train[val_idx],
+                    y_train[val_idx],
+                    seed,
+                    len(classes),
+                )
+                tuning_rows.extend(
+                    {"dataset": dataset, "task": task, "model": model_name, **row}
+                    for row in tuning
+                )
+                selected_hyperparameters[f"{dataset}/{task}/{model_name}"] = selected
                 for model_seed in config["predictive_seeds"]:
                     print(
                         f"[train] {dataset} / {task} / {model_name} / seed={model_seed}",
                         flush=True,
                     )
                     model = make_model(
-                        model_name, config["models"], int(model_seed), len(classes)
+                        model_name, selected, int(model_seed), len(classes)
                     )
                     sample_weight = (
                         compute_sample_weight("balanced", y_train)
@@ -1167,7 +1236,7 @@ def run(config_path: Path) -> None:
                         dataset,
                         task,
                         model_name,
-                        config["models"],
+                        selected,
                         x_train,
                         y_train,
                         x_test,
@@ -1190,6 +1259,7 @@ def run(config_path: Path) -> None:
         output_dir / "explanation_summary.csv", index=False
     )
     pd.DataFrame(ablation_rows).to_csv(output_dir / "feature_ablation.csv", index=False)
+    pd.DataFrame(tuning_rows).to_csv(output_dir / "tuning.csv", index=False)
     paired_bootstrap_comparisons(fidelity_frame, seed).to_csv(
         output_dir / "paired_comparisons.csv", index=False
     )
@@ -1206,6 +1276,7 @@ def run(config_path: Path) -> None:
         "created_utc": pd.Timestamp.utcnow().isoformat(),
         "config": config,
         "datasets": dataset_metadata,
+        "selected_hyperparameters": selected_hyperparameters,
         "files": {
             str(path): {"bytes": path.stat().st_size, "sha256": sha256(path)}
             for path in raw_paths

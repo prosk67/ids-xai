@@ -8,8 +8,10 @@ from src.xai_ids.benchmark import (
     clean_unsw_partitions,
     predictive_metrics,
     bootstrap_mean_ci,
+    candidate_params,
     nearest_neighbor_stability,
     safe_cosine,
+    select_hyperparameters,
     split_validation,
 )
 from src.xai_ids.transparency import evidence_decision
@@ -100,6 +102,42 @@ class BenchmarkUnitTests(unittest.TestCase):
         labels = np.array([0] * 200 + [1] * 3 + [2] * 2)
         fit, _ = split_validation(labels, 0.15, seed=42)
         self.assertEqual(set(np.unique(labels[fit])), {0, 1, 2})
+
+
+    def test_candidate_params_puts_base_first_without_duplicates(self):
+        base = {"max_depth": 7, "learning_rate": 0.08}
+        grid = {"max_depth": [7, 10]}
+        candidates = candidate_params(base, grid)
+        self.assertEqual(candidates[0], base)
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[1], {"max_depth": 10, "learning_rate": 0.08})
+
+    def test_hyperparameter_selection_prefers_base_on_ties(self):
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(200, 3))
+        y = (x[:, 0] > 0).astype(int)
+        base = {"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1}
+        grid = {"max_depth": [4, 5, 6]}
+        chosen, rows = select_hyperparameters(
+            "random_forest", base, grid, x[:150], y[:150], x[150:], y[150:], 42, 2
+        )
+        best = max(row["validation_macro_f1"] for row in rows)
+        winners = [row for row in rows if row["validation_macro_f1"] == best]
+        self.assertEqual(chosen["max_depth"], winners[0]["param_max_depth"])
+        self.assertEqual(sum(row["selected"] for row in rows), 1)
+
+
+    def test_hyperparameter_selection_handles_grid_keys_absent_from_base(self):
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=(200, 3))
+        y = (x[:, 0] > 0).astype(int)
+        base = {"n_estimators": 10, "max_depth": 3}
+        chosen, rows = select_hyperparameters(
+            "random_forest", base, {"max_features": ["sqrt", None]},
+            x[:150], y[:150], x[150:], y[150:], 42, 2,
+        )
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(sum(row["selected"] for row in rows), 1)
 
 
 if __name__ == "__main__":

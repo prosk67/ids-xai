@@ -319,6 +319,7 @@ def run(config_path: Path) -> None:
     output_dir = Path(config["output_dir"])
     extended_dir = output_dir / "extended"
     extended_dir.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
     baseline_rows = []
     balance_rows = []
     calibration_rows = []
@@ -361,7 +362,8 @@ def run(config_path: Path) -> None:
 
                 # Hold the stochastic seed fixed so this ablation changes only
                 # the weighting treatment rather than weighting and RNG state.
-                unweighted = make_model(model_name, config["models"], seed, len(classes))
+                params = manifest["selected_hyperparameters"][f"{dataset}/{task}/{model_name}"]
+                unweighted = make_model(model_name, params, seed, len(classes))
                 if model_name == "random_forest":
                     unweighted.set_params(class_weight=None)
                 unweighted.fit(x_train, y_train)
