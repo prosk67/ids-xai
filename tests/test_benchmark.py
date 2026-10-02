@@ -10,6 +10,8 @@ from src.xai_ids.benchmark import (
     bootstrap_mean_ci,
     candidate_params,
     choose_feature_count,
+    fidelity_control_tests,
+    fidelity_rows,
     nearest_neighbor_stability,
     safe_cosine,
     select_hyperparameters,
@@ -145,6 +147,83 @@ class BenchmarkUnitTests(unittest.TestCase):
         scores = {5: 0.90, 10: 0.948, 20: 0.951, 34: 0.952}
         self.assertEqual(choose_feature_count(scores, 34), 10)
         self.assertEqual(choose_feature_count({5: 0.5, 34: 0.9}, 34), 34)
+
+
+    def test_batched_fidelity_matches_row_by_row(self):
+        from sklearn.ensemble import RandomForestClassifier
+
+        rng_data = np.random.default_rng(1)
+        x = rng_data.normal(size=(300, 6))
+        y = (x[:, 0] + x[:, 1] > 0).astype(int)
+        model = RandomForestClassifier(n_estimators=10, random_state=0).fit(x, y)
+        row, baseline = x[0], np.median(x, axis=0)
+        attribution = np.array([3.0, -2.0, 0.5, 0.1, 0.0, 0.2])
+        predicted = int(model.predict(row.reshape(1, -1))[0])
+        rows = fidelity_rows(
+            model, row, attribution, predicted, baseline, [1, 3], np.random.default_rng(7)
+        )
+        random_rank = np.random.default_rng(7).permutation(6)
+        original = model.predict_proba(row.reshape(1, -1))[0, predicted]
+        masked = row.copy()
+        masked[random_rank[:3]] = baseline[random_rank[:3]]
+        expected = original - model.predict_proba(masked.reshape(1, -1))[0, predicted]
+        got = [r for r in rows if r["control"] == "random" and r["k"] == 3][0]
+        self.assertAlmostEqual(got["probability_drop"], expected, places=12)
+        self.assertEqual({r["control"] for r in rows}, {"top", "bottom", "random"})
+
+    def test_global_control_masks_the_global_ranking(self):
+        from sklearn.ensemble import RandomForestClassifier
+
+        rng_data = np.random.default_rng(2)
+        x = rng_data.normal(size=(300, 4))
+        y = (x[:, 2] > 0).astype(int)
+        model = RandomForestClassifier(n_estimators=10, random_state=0).fit(x, y)
+        rows = fidelity_rows(
+            model, x[0], np.ones(4), int(model.predict(x[:1])[0]), np.zeros(4),
+            [1], np.random.default_rng(0), global_ranking=np.array([2, 0, 1, 3]),
+        )
+        self.assertIn("global", {r["control"] for r in rows})
+
+    def test_control_tests_report_random_and_global_families(self):
+        records = []
+        for idx in range(12):
+            for control, drop in (
+                ("top", 0.5 + idx / 100), ("random", 0.1), ("global", 0.4), ("bottom", 0.0)
+            ):
+                records.append(
+                    {"dataset": "D", "task": "binary", "model": "m", "explainer": "TreeSHAP",
+                     "source_test_index": idx, "control": control, "probability_drop": drop}
+                )
+        result = fidelity_control_tests(pd.DataFrame(records), seed=0)
+        self.assertEqual(set(result["reference"]), {"random", "global"})
+        self.assertTrue((result["ci_low"] > 0).all())
+
+
+class TransparencyContextTests(unittest.TestCase):
+    def test_benchmark_context_uses_random_reference(self):
+        import tempfile
+        from pathlib import Path
+
+        from src.xai_ids.transparency import _benchmark_context
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            base = {"dataset": "D", "task": "binary", "model": "m", "explainer": "TreeSHAP"}
+            pd.DataFrame(
+                [
+                    {**base, "reference": "global", "mean_lift_top_minus_reference": -0.1,
+                     "ci_low": -0.2, "ci_high": 0.0, "holm_adjusted_p": 0.9},
+                    {**base, "reference": "random", "mean_lift_top_minus_reference": 0.2,
+                     "ci_low": 0.1, "ci_high": 0.3, "holm_adjusted_p": 0.001},
+                ]
+            ).to_csv(results / "fidelity_control_tests.csv", index=False)
+            pd.DataFrame(
+                [{**base, "stability_cosine_mean": 0.9, "stability_jaccard_mean": 0.7,
+                  "latency_median_ms": 1.0, "latency_p95_ms": 2.0, "n_explanations": 200}]
+            ).to_csv(results / "explanation_summary.csv", index=False)
+            context = _benchmark_context(results, "D", "binary", "m")
+        self.assertTrue(context["global_random_control_passed"])
+        self.assertAlmostEqual(context["global_top_minus_random_lift"], 0.2)
 
 
 if __name__ == "__main__":

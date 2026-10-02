@@ -486,33 +486,36 @@ def fidelity_rows(
     baseline: np.ndarray,
     k_values: list[int],
     rng: np.random.Generator,
+    global_ranking: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
-    original_probability = float(model.predict_proba(row.reshape(1, -1))[0, predicted_class])
     ranked = np.argsort(-np.abs(attribution))
-    bottom = ranked[::-1]
-    random_rank = rng.permutation(len(ranked))
-    results = []
+    rankings = [("top", ranked), ("bottom", ranked[::-1]), ("random", rng.permutation(len(ranked)))]
+    # The global control masks the model's own importance ranking, identical for
+    # every flow; a useful local explanation should beat it.
+    if global_ranking is not None:
+        rankings.append(("global", np.asarray(global_ranking)))
+    variants = [row]
+    labels = []
     for k in k_values:
         k_eff = min(int(k), len(row))
-        for control, indices in (
-            ("top", ranked[:k_eff]),
-            ("bottom", bottom[:k_eff]),
-            ("random", random_rank[:k_eff]),
-        ):
-            perturbed = row.copy()
-            perturbed[indices] = baseline[indices]
-            probabilities = model.predict_proba(perturbed.reshape(1, -1))[0]
-            new_prediction = int(np.argmax(probabilities))
-            results.append(
-                {
-                    "k": int(k_eff),
-                    "control": control,
-                    "probability_drop": original_probability
-                    - float(probabilities[predicted_class]),
-                    "flipped": int(new_prediction != predicted_class),
-                }
-            )
-    return results
+        for control, order in rankings:
+            masked = row.copy()
+            masked[order[:k_eff]] = baseline[order[:k_eff]]
+            variants.append(masked)
+            labels.append((k_eff, control))
+    # One model call per flow: single-row predict_proba on a parallel forest
+    # costs milliseconds of thread start-up each time.
+    probabilities = model.predict_proba(np.vstack(variants))
+    original = float(probabilities[0, predicted_class])
+    return [
+        {
+            "k": k_eff,
+            "control": control,
+            "probability_drop": original - float(p[predicted_class]),
+            "flipped": int(int(np.argmax(p)) != predicted_class),
+        }
+        for (k_eff, control), p in zip(labels, probabilities[1:])
+    ]
 
 
 def safe_cosine(left: np.ndarray, right: np.ndarray) -> float:
@@ -574,6 +577,7 @@ def evaluate_explainer(
     classes: list[str],
     config: dict[str, Any],
     seed: int,
+    global_ranking: np.ndarray | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], dict[str, Any]]:
     n = int(config["explanation_samples"])
     full_prediction = model.predict(x_test).astype(int)
@@ -653,6 +657,7 @@ def evaluate_explainer(
             np.asarray(preprocessor.baseline_),
             k_values,
             rng,
+            global_ranking=global_ranking,
         ):
             fidelity.append({**common, **item})
 
@@ -755,6 +760,17 @@ def evaluate_explainer(
     return attribution_rows, fidelity, stability, summary
 
 
+def holm_adjust(p_values: np.ndarray) -> np.ndarray:
+    """Holm step-down adjustment controlling family-wise error."""
+    p_values = np.asarray(p_values, dtype=float)
+    adjusted = np.empty(len(p_values), dtype=float)
+    running = 0.0
+    for rank, index in enumerate(np.argsort(p_values)):
+        running = max(running, min(1.0, (len(p_values) - rank) * p_values[index]))
+        adjusted[index] = running
+    return adjusted
+
+
 def paired_bootstrap_comparisons(fidelity: pd.DataFrame, seed: int) -> pd.DataFrame:
     rows = []
     top = fidelity[fidelity["control"] == "top"]
@@ -792,18 +808,15 @@ def paired_bootstrap_comparisons(fidelity: pd.DataFrame, seed: int) -> pd.DataFr
         )
     result = pd.DataFrame(rows)
     if not result.empty:
-        order = np.argsort(result["wilcoxon_one_sided_p"].to_numpy())
-        adjusted = np.empty(len(result), dtype=float)
-        running = 0.0
-        for rank, index in enumerate(order):
-            value = min(1.0, (len(result) - rank) * result.iloc[index]["wilcoxon_one_sided_p"])
-            running = max(running, value)
-            adjusted[index] = running
-        result["holm_adjusted_p"] = adjusted
+        result["holm_adjusted_p"] = holm_adjust(result["wilcoxon_one_sided_p"].to_numpy())
     return result
 
 
 def fidelity_control_tests(fidelity: pd.DataFrame, seed: int) -> pd.DataFrame:
+    """Test top-ranked deletion against each negative control, per explainer.
+
+    Holm correction is applied separately within each reference family.
+    """
     rows = []
     keys = ["dataset", "task", "model", "explainer"]
     for group_key, group in fidelity.groupby(keys):
@@ -813,35 +826,35 @@ def fidelity_control_tests(fidelity: pd.DataFrame, seed: int) -> pd.DataFrame:
             .unstack("control")
             .dropna()
         )
-        if not {"top", "random"}.issubset(per.columns) or per.empty:
-            continue
-        differences = (per["top"] - per["random"]).to_numpy()
-        mean, low, high = bootstrap_mean_ci(differences, seed)
-        p_value = (
-            1.0
-            if np.allclose(differences, 0)
-            else float(wilcoxon(differences, alternative="greater", zero_method="wilcox").pvalue)
-        )
-        rows.append(
-            dict(
-                zip(keys, group_key),
-                n_pairs=len(differences),
-                mean_lift_top_minus_random=mean,
-                ci_low=low,
-                ci_high=high,
-                wilcoxon_one_sided_p=p_value,
+        for reference in ("random", "global"):
+            if not {"top", reference}.issubset(per.columns) or per.empty:
+                continue
+            differences = (per["top"] - per[reference]).to_numpy()
+            mean, low, high = bootstrap_mean_ci(differences, seed)
+            p_value = (
+                1.0
+                if np.allclose(differences, 0)
+                else float(wilcoxon(differences, alternative="greater", zero_method="wilcox").pvalue)
             )
-        )
+            rows.append(
+                dict(
+                    zip(keys, group_key),
+                    reference=reference,
+                    n_pairs=len(differences),
+                    mean_lift_top_minus_reference=mean,
+                    mean_lift_top_minus_random=mean if reference == "random" else np.nan,
+                    ci_low=low,
+                    ci_high=high,
+                    wilcoxon_one_sided_p=p_value,
+                )
+            )
     result = pd.DataFrame(rows)
     if not result.empty:
-        order = np.argsort(result["wilcoxon_one_sided_p"].to_numpy())
-        adjusted = np.empty(len(result), dtype=float)
-        running = 0.0
-        for rank, index in enumerate(order):
-            value = min(1.0, (len(result) - rank) * result.iloc[index]["wilcoxon_one_sided_p"])
-            running = max(running, value)
-            adjusted[index] = running
-        result["holm_adjusted_p"] = adjusted
+        result["holm_adjusted_p"] = np.nan
+        for _, family in result.groupby("reference"):
+            result.loc[family.index, "holm_adjusted_p"] = holm_adjust(
+                family["wilcoxon_one_sided_p"].to_numpy()
+            )
     return result
 
 
@@ -1237,6 +1250,7 @@ def run(config_path: Path) -> None:
                 safe_name = f"{dataset}_{task}_{model_name}".replace("-", "_")
                 joblib.dump(artifact, output_dir / "models" / f"{safe_name}.joblib", compress=3)
 
+                global_ranking = np.argsort(-np.asarray(frozen_model.feature_importances_))
                 for explainer_name in ("TreeSHAP", "LIME"):
                     print(
                         f"[explain] {dataset} / {task} / {model_name} / {explainer_name}",
@@ -1255,6 +1269,7 @@ def run(config_path: Path) -> None:
                         classes,
                         config["evaluation"],
                         seed,
+                        global_ranking,
                     )
                     attribution_rows.extend(attrs)
                     fidelity_records.extend(fidelity)

@@ -41,25 +41,26 @@ def _ranking_score(
     ranking: np.ndarray,
     k_values: list[int],
 ) -> tuple[float, list[dict[str, Any]]]:
-    original = float(model.predict_proba(row.reshape(1, -1))[0, predicted_class])
-    records = []
-    drops = []
+    variants = [row]
+    k_list = []
     for k in k_values:
         k_eff = min(int(k), len(row))
         masked = row.copy()
         masked[ranking[:k_eff]] = baseline[ranking[:k_eff]]
-        probability = float(model.predict_proba(masked.reshape(1, -1))[0, predicted_class])
-        drop = original - probability
-        drops.append(drop)
-        records.append(
-            {
-                "k": k_eff,
-                "probability_after_masking": probability,
-                "probability_drop": drop,
-                "prediction_flipped": bool(np.argmax(model.predict_proba(masked.reshape(1, -1))[0]) != predicted_class),
-            }
-        )
-    return float(np.mean(drops)), records
+        variants.append(masked)
+        k_list.append(k_eff)
+    probabilities = model.predict_proba(np.vstack(variants))
+    original = float(probabilities[0, predicted_class])
+    records = [
+        {
+            "k": k_eff,
+            "probability_after_masking": float(p[predicted_class]),
+            "probability_drop": original - float(p[predicted_class]),
+            "prediction_flipped": bool(np.argmax(p) != predicted_class),
+        }
+        for k_eff, p in zip(k_list, probabilities[1:])
+    ]
+    return float(np.mean([record["probability_drop"] for record in records])), records
 
 
 def local_deletion_evidence(
@@ -126,7 +127,14 @@ def _benchmark_context(results_dir: Path, dataset: str, task: str, model_name: s
         & controls["model"].eq(model_name)
         & controls["explainer"].eq("TreeSHAP")
     )
+    if "reference" in controls:
+        selector &= controls["reference"].eq("random")
     control = controls.loc[selector].iloc[0]
+    lift_column = (
+        "mean_lift_top_minus_reference"
+        if "mean_lift_top_minus_reference" in controls
+        else "mean_lift_top_minus_random"
+    )
     selector = (
         summaries["dataset"].eq(dataset)
         & summaries["task"].eq(task)
@@ -137,7 +145,7 @@ def _benchmark_context(results_dir: Path, dataset: str, task: str, model_name: s
     passed = bool(control["holm_adjusted_p"] < 0.05 and control["ci_low"] > 0)
     context = {
         "global_random_control_passed": passed,
-        "global_top_minus_random_lift": float(control["mean_lift_top_minus_random"]),
+        "global_top_minus_random_lift": float(control[lift_column]),
         "global_lift_ci": [float(control["ci_low"]), float(control["ci_high"])],
         "global_holm_adjusted_p": float(control["holm_adjusted_p"]),
         "neighborhood_cosine_mean": float(summary["stability_cosine_mean"]),

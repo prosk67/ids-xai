@@ -409,7 +409,9 @@ def run(config_path: Path) -> None:
     pd.DataFrame(lime_rows).to_csv(extended_dir / "lime_budget_ablation.csv", index=False)
     _summarize_existing_outputs(output_dir, extended_dir)
 
-    controls = pd.read_csv(output_dir / "fidelity_control_tests.csv")
+    all_controls = pd.read_csv(output_dir / "fidelity_control_tests.csv")
+    controls = all_controls[all_controls.reference.eq("random")]
+    global_controls = all_controls[all_controls.reference.eq("global")]
     paired = pd.read_csv(output_dir / "paired_comparisons.csv")
     coverage = pd.DataFrame(
         [
@@ -436,6 +438,10 @@ def run(config_path: Path) -> None:
             ((controls.explainer == "TreeSHAP") & (controls.holm_adjusted_p < 0.05) & (controls.ci_low > 0)).sum()
         ),
         "tree_shap_random_controls_total": int((controls.explainer == "TreeSHAP").sum()),
+        "global_importance_controls_passed": {
+            explainer: int(((group.holm_adjusted_p < 0.05) & (group.ci_low > 0)).sum())
+            for explainer, group in global_controls.groupby("explainer")
+        },
         "paired_tree_shap_superiority_intervals_above_zero": int((paired.ci_low > 0).sum()),
         "paired_comparisons_total": len(paired),
         "claim": "Opaque tree-IDS decisions are converted into auditable and rejectable model evidence; causal and universal interpretability are not claimed.",
