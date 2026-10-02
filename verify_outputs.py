@@ -2,11 +2,14 @@ from pathlib import Path
 import json
 
 import pandas as pd
+import yaml
 from pypdf import PdfReader
 
 
 root = Path(__file__).resolve().parent
 outputs = root / "outputs"
+config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+expected_flows = int(config["evaluation"]["explanation_samples"])
 required = [
     "predictive_metrics.csv",
     "per_class_metrics.csv",
@@ -43,16 +46,21 @@ explanations = pd.read_csv(outputs / "explanation_summary.csv")
 paired = pd.read_csv(outputs / "paired_comparisons.csv")
 fidelity = pd.read_csv(outputs / "fidelity.csv")
 controls = pd.read_csv(outputs / "fidelity_control_tests.csv")
-assert len(predictive) == 40
+assert len(predictive) == 8 * len(config["predictive_seeds"])
 assert len(explanations) == 16
 assert len(paired) == 8
-assert predictive["seed"].nunique() == 5
+assert predictive["seed"].nunique() == len(config["predictive_seeds"])
 assert predictive["macro_f1"].between(0, 1).all()
 assert explanations["fidelity_mean"].notna().all()
-assert (paired["ci_low"] > 0).all()
-assert (paired["n_pairs"] == 40).all()
+# These checks are about internal consistency only. Which explainer wins is a
+# research outcome and must not be asserted here.
+assert paired["n_pairs"].eq(expected_flows).all(), paired["n_pairs"].unique()
+assert paired["ci_low"].le(paired["mean_difference_shap_minus_lime"]).all()
+assert paired["mean_difference_shap_minus_lime"].le(paired["ci_high"]).all()
+assert paired["holm_adjusted_p"].between(0, 1).all()
+assert paired["holm_adjusted_p"].ge(paired["wilcoxon_one_sided_p"] - 1e-12).all()
 
-# TreeSHAP and LIME must be evaluated on the same 40 source flows in every
+# TreeSHAP and LIME must be evaluated on the same source flows in every
 # configuration, otherwise the paired statistical comparisons are invalid.
 for _, group in fidelity.groupby(["dataset", "task", "model"]):
     source_sets = {
@@ -61,13 +69,11 @@ for _, group in fidelity.groupby(["dataset", "task", "model"]):
     }
     assert source_sets.keys() == {"TreeSHAP", "LIME"}
     assert source_sets["TreeSHAP"] == source_sets["LIME"]
-    assert len(source_sets["TreeSHAP"]) == 40
+    assert len(source_sets["TreeSHAP"]) == expected_flows
 
 assert len(controls) == 16
-tree_controls = controls[controls["explainer"] == "TreeSHAP"]
-lime_controls = controls[controls["explainer"] == "LIME"]
-assert (tree_controls["holm_adjusted_p"] < 0.05).sum() == 8
-assert (lime_controls["holm_adjusted_p"] < 0.05).sum() == 7
+assert controls["holm_adjusted_p"].between(0, 1).all()
+assert controls["ci_low"].le(controls["ci_high"]).all()
 
 coverage = pd.read_csv(outputs / "extended" / "literature_purpose_coverage.csv")
 assert (coverage["status"] == "complete").sum() >= 11
@@ -99,7 +105,9 @@ assert balancing["seed"].iloc[0] == manifest["config"]["seed"]
 paper = root / "output" / "pdf" / "xai_ids_ieee_paper.pdf"
 reader = PdfReader(paper)
 text = "\n".join(page.extract_text() or "" for page in reader.pages)
-assert len(reader.pages) == 6
+# Six pages is the current draft; allow growth up to a typical IEEE
+# conference limit until the target venue is chosen.
+assert 6 <= len(reader.pages) <= 8, len(reader.pages)
 assert float(reader.pages[0].mediabox.width) == 612
 assert float(reader.pages[0].mediabox.height) == 792
 for heading in (
