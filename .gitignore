@@ -1,0 +1,13 @@
+# Raw datasets are not redistributed (see README "Dataset preparation")
+data/
+# Serialized models are regenerated locally
+outputs/models/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+# Superseded 17 Aug 2026 copy of the project, kept locally for reference
+498R/
+498R_COLAB_BUNDLE.zip
+# Duplicate of output/pdf/xai_ids_ieee_paper.pdf (README links the output/pdf copy)
+/xai_ids_ieee_paper.pdf
