@@ -12,58 +12,58 @@
 
 - Dataset/model context: UNSW-NB15 / binary / xgboost
 - Predicted class: **Attack**
-- Predicted probability: **0.886009**
+- Predicted probability: **0.887324**
 - Model seed: 42
 
 Class probabilities:
 
-- Attack: 0.886009
-- Normal: 0.113991
+- Attack: 0.887324
+- Normal: 0.112676
 
 ## Top signed TreeSHAP evidence
 
 | Rank | Feature | Observed value | Attribution | Direction |
 |---:|---|---:|---:|---|
-| 1 | dload | 0.0 | 1.061371 | supports prediction |
-| 2 | ct_src_dport_ltm | 1 | 0.344122 | supports prediction |
-| 3 | ackdat | 0.0 | -0.335638 | opposes prediction |
-| 4 | dbytes | 0 | 0.245044 | supports prediction |
-| 5 | tcprtt | 0.0 | 0.192306 | supports prediction |
-| 6 | synack | 0.0 | 0.167836 | supports prediction |
-| 7 | smean | 248 | 0.166420 | supports prediction |
-| 8 | dmean | 0 | 0.144980 | supports prediction |
-| 9 | sloss | 0 | 0.139830 | supports prediction |
-| 10 | djit | 0.0 | 0.081560 | supports prediction |
+| 1 | dload | 0.0 | 1.088695 | supports prediction |
+| 2 | ackdat | 0.0 | -0.379357 | opposes prediction |
+| 3 | ct_src_dport_ltm | 1 | 0.320968 | supports prediction |
+| 4 | dmean | 0 | 0.297214 | supports prediction |
+| 5 | dbytes | 0 | 0.293959 | supports prediction |
+| 6 | synack | 0.0 | 0.178716 | supports prediction |
+| 7 | sloss | 0 | 0.160218 | supports prediction |
+| 8 | sjit | 0.0 | -0.153432 | opposes prediction |
+| 9 | smean | 248 | 0.152121 | supports prediction |
+| 10 | dinpkt | 0.0 | -0.114517 | opposes prediction |
 
 Positive attribution supports the reported class; negative attribution opposes it. Attribution is model evidence, not real-world causality.
 
 ## Alert-specific fidelity test
 
-- Top-ranked deletion score: 0.156774
-- Bottom-ranked deletion score: -0.000649
-- Mean of 200 random rankings: 0.082928
-- Top-minus-random lift: 0.073846
-- Empirical one-sided local p-value: 0.189055
+- Top-ranked deletion score: 0.062053
+- Bottom-ranked deletion score: -0.027533
+- Mean of 200 random rankings: 0.055947
+- Top-minus-random lift: 0.006106
+- Empirical one-sided local p-value: 0.422886
 
 The deletion score is the mean predicted-probability drop after replacing the top 1, 3, 5, and 10 features with training-derived baseline values.
 
 ## Benchmark validation context
 
 - TreeSHAP passed corrected random control: True
-- Mean top-minus-random lift: 0.199435
-- 95% bootstrap interval: [0.108212, 0.291204]
-- Holm-adjusted p-value: 0.000877
-- Mean neighbor cosine stability: 0.543362
-- Mean top-5 neighbor overlap: 0.507837
-- Median/P95 explanation latency: 2.781 / 2.937 ms
+- Mean top-minus-random lift: 0.243804
+- 95% bootstrap interval: [0.205468, 0.281411]
+- Holm-adjusted p-value: 0.000000
+- Mean neighbor cosine stability: 0.747170
+- Mean top-5 neighbor overlap: 0.629841
+- Median/P95 explanation latency: 1.670 / 3.526 ms
 
 Mean TreeSHAP deletion scores from the separate reference-sensitivity audit:
 
-- marginal_training_row: 0.189395
-- nearest_opposite_prediction: 0.236665
-- nearest_same_prediction: -0.005704
-- training_median_mode: 0.232671
-- zero: 0.277167
+- marginal_training_row: 0.297949
+- nearest_opposite_prediction: 0.266929
+- nearest_same_prediction: -0.002803
+- training_median_mode: 0.290387
+- zero: 0.266992
 
 ## Interpretation rule
 

@@ -67,33 +67,39 @@ def workflow_figure(path: Path) -> None:
 
 
 def paired_fidelity_figure(paired: pd.DataFrame, path: Path) -> None:
-    data = paired.copy()
-    data["label"] = data.apply(_context_label, axis=1)
-    data = data.sort_values("mean_difference_shap_minus_lime")
-    y = np.arange(len(data))
-    means = data["mean_difference_shap_minus_lime"].to_numpy()
-    lower = means - data["ci_low"].to_numpy()
-    upper = data["ci_high"].to_numpy() - means
-    colors = [BLUE if "CIC" in label else ORANGE for label in data["label"]]
-    fig, ax = plt.subplots(figsize=(3.4, 3.3))
-    ax.errorbar(
-        means,
-        y,
-        xerr=np.vstack([lower, upper]),
-        fmt="none",
-        ecolor="#536273",
-        elinewidth=1.1,
-        capsize=2.2,
-        zorder=1,
-    )
-    ax.scatter(means, y, c=colors, s=28, edgecolor="white", linewidth=0.5, zorder=2)
-    ax.axvline(0, color="black", lw=0.8, linestyle="--")
-    ax.set_yticks(y, data["label"], fontsize=6.8)
-    ax.tick_params(axis="x", labelsize=7)
-    ax.set_xlabel("Mean fidelity difference: TreeSHAP - LIME", fontsize=7.4)
-    ax.set_title("Paired top-k deletion fidelity (95% bootstrap CI)", fontsize=8.2)
-    ax.grid(axis="x", alpha=0.25)
-    ax.spines[["top", "right", "left"]].set_visible(False)
+    metrics = [
+        ("deletion", "Top-k deletion fidelity"),
+        ("faithfulness_correlation", "Faithfulness correlation"),
+    ]
+    metrics = [(name, title) for name, title in metrics if name in set(paired.get("metric", ["deletion"]))]
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(3.4, 2.15 * len(metrics) + 0.3), squeeze=False)
+    for ax, (metric, title) in zip(axes[:, 0], metrics):
+        data = paired[paired["metric"].eq(metric)].copy() if "metric" in paired else paired.copy()
+        data["label"] = data.apply(_context_label, axis=1)
+        data = data.sort_values("mean_difference_shap_minus_lime")
+        y = np.arange(len(data))
+        means = data["mean_difference_shap_minus_lime"].to_numpy()
+        lower = means - data["ci_low"].to_numpy()
+        upper = data["ci_high"].to_numpy() - means
+        colors = [BLUE if "CIC" in label else ORANGE for label in data["label"]]
+        ax.errorbar(
+            means,
+            y,
+            xerr=np.vstack([lower, upper]),
+            fmt="none",
+            ecolor="#536273",
+            elinewidth=1.1,
+            capsize=2.2,
+            zorder=1,
+        )
+        ax.scatter(means, y, c=colors, s=26, edgecolor="white", linewidth=0.5, zorder=2)
+        ax.axvline(0, color="black", lw=0.8, linestyle="--")
+        ax.set_yticks(y, data["label"], fontsize=6.6)
+        ax.tick_params(axis="x", labelsize=7)
+        ax.set_title(f"{title}: TreeSHAP - LIME (95% CI)", fontsize=7.8)
+        ax.grid(axis="x", alpha=0.25)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+    axes[-1, 0].set_xlabel("Paired mean difference over shared flows", fontsize=7.2)
     fig.tight_layout(pad=0.5)
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -133,15 +139,26 @@ def latency_configuration_figure(xai: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def class_recall_figure(per_class: pd.DataFrame, path: Path) -> None:
+def class_recall_figure(
+    per_class: pd.DataFrame, path: Path, conflicts: pd.DataFrame | None = None
+) -> None:
     data = per_class[
         per_class.dataset.eq("UNSW-NB15")
         & per_class.task.eq("multiclass")
         & per_class.seed.eq(42)
     ].copy()
     pivot = data.pivot(index="class", columns="model", values="recall")
-    pivot = pivot.rename(columns={"random_forest": "RF", "xgboost": "XGBoost"})
-    pivot = pivot.sort_values(["RF", "XGBoost"])
+    pivot = pivot.rename(columns={"random_forest": "RF recall", "xgboost": "XGB recall"})
+    if conflicts is not None:
+        # Share of test rows whose exact feature vector also appears with
+        # another label: these cannot be separated by any model.
+        share = conflicts[
+            conflicts.dataset.eq("UNSW-NB15")
+            & conflicts.task.eq("multiclass")
+            & conflicts.partition.eq("test")
+        ].set_index("class")["conflicting_share"]
+        pivot["Label conflict"] = share.reindex(pivot.index)
+    pivot = pivot.sort_values(["RF recall", "XGB recall"])
     fig, ax = plt.subplots(figsize=(3.35, 3.7))
     sns.heatmap(
         pivot,
@@ -152,15 +169,15 @@ def class_recall_figure(per_class: pd.DataFrame, path: Path) -> None:
         vmax=1,
         linewidths=0.35,
         linecolor="white",
-        cbar_kws={"label": "Recall", "shrink": 0.72},
+        cbar_kws={"shrink": 0.72},
         annot_kws={"fontsize": 6.2},
         ax=ax,
     )
     ax.set_xlabel("")
     ax.set_ylabel("")
     ax.tick_params(axis="y", labelsize=6.5, rotation=0)
-    ax.tick_params(axis="x", labelsize=7, rotation=0)
-    ax.set_title("UNSW-NB15 multiclass recall by attack family", fontsize=8.2)
+    ax.tick_params(axis="x", labelsize=6.4, rotation=0)
+    ax.set_title("UNSW-NB15 multiclass: recall vs. label conflict", fontsize=8.2)
     fig.tight_layout(pad=0.4)
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -175,4 +192,6 @@ def build_all(results_dir: Path) -> None:
     workflow_figure(figures / "paper_workflow.png")
     paired_fidelity_figure(paired, figures / "paper_paired_fidelity.png")
     latency_configuration_figure(xai, figures / "paper_latency_configurations.png")
-    class_recall_figure(per_class, figures / "paper_unsw_recall.png")
+    conflicts_path = results_dir / "extended" / "label_conflicts.csv"
+    conflicts = pd.read_csv(conflicts_path) if conflicts_path.exists() else None
+    class_recall_figure(per_class, figures / "paper_unsw_recall.png", conflicts)

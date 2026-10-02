@@ -702,8 +702,10 @@ def run(config_path: Path) -> None:
             explainer: int(((group.holm_adjusted_p < 0.05) & (group.ci_low > 0)).sum())
             for explainer, group in global_controls.groupby("explainer")
         },
-        "paired_tree_shap_superiority_intervals_above_zero": int((paired.ci_low > 0).sum()),
-        "paired_comparisons_total": len(paired),
+        "paired_tree_shap_superiority_intervals_above_zero": {
+            metric: int((group.ci_low > 0).sum()) for metric, group in paired.groupby("metric")
+        },
+        "paired_comparisons_total": {metric: len(group) for metric, group in paired.groupby("metric")},
         "claim": "Opaque tree-IDS decisions are converted into auditable and rejectable model evidence; causal and universal interpretability are not claimed.",
     }
     (extended_dir / "black_box_audit_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

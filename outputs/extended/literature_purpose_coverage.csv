@@ -2,7 +2,7 @@ literature_requirement,status,evidence
 Modern dual-dataset evaluation,complete,CIC-IDS2017 and official UNSW-NB15 split
 Binary and multiclass tasks,complete,Both tasks on both datasets
 Simple predictive baselines,complete,Majority and depth-5 decision tree
-Five predictive seeds,complete,"Seeds 42, 52, 62, 72, and 82"
+Five predictive seeds,complete,"Seeds 42, 52, 62, 72, and 82 for prediction and explanation"
 Leakage-safe preprocessing,complete,Training-only medians and category dictionaries
 Random and bottom fidelity controls,complete,Paired deletion controls with Holm correction
 Alternative masking baselines,complete,"Median/mode, zero, marginal row, and nearest same/opposite predictions"
@@ -10,6 +10,13 @@ LIME sampling sensitivity,complete,"100, 350, and 700 samples with five repeats"
 Explanation by class and error type,complete,Class and TP/FP/TN/FN summaries
 Stability distributions,complete,"Q10, median, and Q90 for cosine and top-5 overlap"
 Probability calibration audit,complete,"Brier score, ECE, and reliability curves"
+Probability recalibration,complete,Isotonic recalibration fitted on a training-only validation split
+SHAP background ablation,complete,Path-dependent versus interventional TreeSHAP (100-row background) for XGBoost
+Validation-based selection,complete,Hyperparameters and feature count chosen on a training-only validation split
+Global-importance control,complete,Top-ranked deletion tested against the model's own global feature ranking
+Faithfulness correlation,complete,Correlation between attribution mass and masking effect on random feature subsets
+Explanation sanity check,complete,Data-randomization test against a model trained on permuted labels
+Label-conflict separability audit,complete,"Share of rows whose exact feature vector carries another label, with accuracy ceiling"
 Balancing sensitivity,partial,Class weighting versus none; SMOTE omitted to avoid synthetic categorical flows
 Human analyst usefulness,future work,Requires ethics-approved task-based user study
 Causal explanation,out of scope,Post-hoc model evidence cannot establish network causality

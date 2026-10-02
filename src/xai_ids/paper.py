@@ -300,7 +300,7 @@ def predictive_table(frame: pd.DataFrame, dataset: str, col_w: float, s):
 
 def xai_table(xai: pd.DataFrame, paired: pd.DataFrame, dataset: str, col_w: float, s):
     subset = xai[xai.dataset.eq(dataset)]
-    rows = [["Task/model", "F-S", "F-L", "Delta [95% CI]", "p-H", "Med. ms S/L"]]
+    rows = [["Task/model", "F-S", "F-L", "Delta [95% CI]", "p-H", "FC S/L", "Med. ms S/L"]]
     for task in ("binary", "multiclass"):
         for model in ("random_forest", "xgboost"):
             pair = paired[
@@ -316,6 +316,7 @@ def xai_table(xai: pd.DataFrame, paired: pd.DataFrame, dataset: str, col_w: floa
                     f"{lime_row.fidelity_mean:.3f}",
                     f"{pair.mean_difference_shap_minus_lime:.3f} [{pair.ci_low:.3f}, {pair.ci_high:.3f}]",
                     "<0.0001" if pair.holm_adjusted_p < 0.0001 else f"{pair.holm_adjusted_p:.4f}",
+                    f"{shap_row.faithfulness_correlation_mean:.2f}/{lime_row.faithfulness_correlation_mean:.2f}",
                     f"{shap_row.latency_median_ms:.1f}/{lime_row.latency_median_ms:.1f}",
                 ]
             )
@@ -328,7 +329,7 @@ def xai_table(xai: pd.DataFrame, paired: pd.DataFrame, dataset: str, col_w: floa
             ),
             make_table(
                 rows,
-                [0.48 * inch, 0.29 * inch, 0.29 * inch, 1.08 * inch, 0.38 * inch, col_w - 2.52 * inch],
+                [0.55 * inch, 0.27 * inch, 0.27 * inch, 0.92 * inch, 0.44 * inch, 0.44 * inch, col_w - 2.89 * inch],
                 font_size=5.35,
             ),
         ]
@@ -357,17 +358,41 @@ def dataset_protocol_table(col_w: float, s, manifest: dict):
     )
 
 
-def experiment_settings_table(col_w: float, s, evaluation: dict):
+def _grid_text(base: dict, grid: dict) -> str:
+    values = []
+    for key, options in grid.items():
+        shown = "/".join("none" if option is None else str(option) for option in options)
+        values.append(f"{key.replace('_', ' ')} {shown}")
+    return "; ".join(values)
+
+
+def experiment_settings_table(col_w: float, s, evaluation: dict, config: dict):
+    models = config["models"]
+    tuning = config["tuning"]
     rows = [
-        ["Component", "Fixed setting"],
-        ["RF", "120 trees; depth 18; min. leaf 2; balanced bootstrap weights"],
-        ["XGBoost", "160 trees; depth 7; eta 0.08; row/column subsample 0.85"],
-        ["Explanations", f"{evaluation['explanation_samples']} matched flows/config.; LIME {evaluation['lime_samples']} samples; k={{1,3,5,10}}"],
-        ["Inference", "2,000 paired bootstrap resamples; one-sided Wilcoxon; Holm correction"],
+        ["Component", "Setting"],
+        [
+            "RF grid",
+            f"{models['random_forest']['n_estimators']} trees; {_grid_text(models['random_forest'], tuning['random_forest'])}",
+        ],
+        [
+            "XGB grid",
+            f"subsample 0.85; {_grid_text(models['xgboost'], tuning['xgboost'])}",
+        ],
+        [
+            "Selection",
+            f"Validation macro-F1 on a {tuning['validation_size']:.0%} stratified training split; refit on all training rows",
+        ],
+        [
+            "Explanations",
+            f"{evaluation['explanation_samples']} fixed flows x {len(evaluation['explanation_seeds'])} model seeds; "
+            f"LIME {evaluation['lime_samples']} samples; k={{{','.join(str(k) for k in evaluation['fidelity_k'])}}}",
+        ],
+        ["Inference", "2,000 paired bootstrap resamples; Wilcoxon; Holm within each family"],
     ]
     return KeepTogether(
         [
-            Paragraph("TABLE II<br/>PRESPECIFIED EXPERIMENT SETTINGS", s["table_caption"]),
+            Paragraph("TABLE II<br/>EXPERIMENT SETTINGS", s["table_caption"]),
             make_table(
                 rows,
                 [0.72 * inch, col_w - 0.72 * inch],
@@ -379,7 +404,7 @@ def experiment_settings_table(col_w: float, s, evaluation: dict):
 
 
 def ablation_table(ablation: pd.DataFrame, col_w: float, s):
-    rows = [["Context", "Full k/F1", "Best reduced k/F1", "Delta"]]
+    rows = [["Context", "Full k/F1", "Chosen k/F1 (val.)", "Test delta"]]
     for dataset in ("CIC-IDS2017", "UNSW-NB15"):
         for task in ("binary", "multiclass"):
             for model in ("random_forest", "xgboost"):
@@ -387,9 +412,9 @@ def ablation_table(ablation: pd.DataFrame, col_w: float, s):
                     ablation.dataset.eq(dataset)
                     & ablation.task.eq(task)
                     & ablation.model.eq(model)
-                ].copy()
+                ]
                 full = group.loc[group.feature_count.idxmax()]
-                reduced = group[group.feature_count.lt(full.feature_count)].sort_values("macro_f1").iloc[-1]
+                chosen = group[group.selected.eq(1)].iloc[0]
                 label = (
                     f"{'CIC' if dataset == 'CIC-IDS2017' else 'UNSW'}/"
                     f"{'Bin' if task == 'binary' else 'Multi'}/"
@@ -398,14 +423,14 @@ def ablation_table(ablation: pd.DataFrame, col_w: float, s):
                 rows.append(
                     [
                         label,
-                        f"{int(full.feature_count)}/{full.macro_f1:.4f}",
-                        f"{int(reduced.feature_count)}/{reduced.macro_f1:.4f}",
-                        f"{reduced.macro_f1 - full.macro_f1:+.4f}",
+                        f"{int(full.feature_count)}/{full.test_macro_f1:.4f}",
+                        f"{int(chosen.feature_count)}/{chosen.test_macro_f1:.4f}",
+                        f"{chosen.test_macro_f1 - full.test_macro_f1:+.4f}",
                     ]
                 )
     return KeepTogether(
         [
-            Paragraph("TABLE VII<br/>BEST REDUCED FEATURE SET VERSUS FULL MODEL", s["table_caption"]),
+            Paragraph("TABLE VII<br/>VALIDATION-CHOSEN FEATURE COUNT VERSUS FULL MODEL (TEST MACRO-F1)", s["table_caption"]),
             make_table(
                 rows,
                 [0.78 * inch, 0.78 * inch, 1.15 * inch, col_w - 2.71 * inch],
@@ -421,6 +446,10 @@ def robustness_table(
     calibration: pd.DataFrame,
     masking: pd.DataFrame,
     lime_budget: pd.DataFrame,
+    recalibration: pd.DataFrame,
+    background: pd.DataFrame,
+    sanity: pd.DataFrame,
+    conflicts: pd.DataFrame,
     col_w: float,
     s,
 ):
@@ -434,13 +463,22 @@ def robustness_table(
     lime = lime_budget.groupby("lime_samples").agg(
         stability=("mean_self_stability_cosine", "mean")
     )
+    shap_modes = background.groupby("shap_mode").deletion_score.mean()
+    sanity_jaccard = sanity.groupby("explainer").top5_jaccard_real_vs_permuted.mean()
+    unsw_conflicts = conflicts[
+        conflicts.dataset.eq("UNSW-NB15") & conflicts.task.eq("multiclass") & conflicts.partition.eq("test")
+    ]
     rows = [
         ["Audit", "Levels", "Main result"],
         ["Simple baseline", "Majority; depth-5 tree", f"Tree macro-F1 {baseline_range.min():.3f}-{baseline_range.max():.3f}"],
         ["Class weighting", "Weighted; none", f"Weighted higher in {weighted_wins}/8 contexts"],
         ["Calibration", "10 binary bins", f"ECE {ece.min():.3f}-{ece.max():.3f}"],
+        ["Recalibration", "Isotonic on validation", f"ECE {recalibration.ece_raw.mean():.3f}->{recalibration.ece_isotonic.mean():.3f} (mean)"],
         ["Mask reference", "Median; zero; marginal; neighbors", f"Mean deletion [{mask_mean.min():.3f}, {mask_mean.max():.3f}]"],
         ["LIME budget", "100; 350; 700", f"Stability {lime.stability.iloc[0]:.3f}->{lime.stability.iloc[-1]:.3f}"],
+        ["SHAP background", "Path-dep.; interventional", f"Deletion {shap_modes['path_dependent']:.3f} vs {shap_modes['interventional']:.3f} (XGB)"],
+        ["Sanity check", "Real vs permuted labels", f"Top-5 overlap S {sanity_jaccard['TreeSHAP']:.2f}; L {sanity_jaccard['LIME']:.2f}"],
+        ["Label conflict", "UNSW multiclass test", f"Ceiling {unsw_conflicts.accuracy_ceiling.iloc[0]:.3f}; max class {unsw_conflicts.conflicting_share.max():.2f}"],
     ]
     return KeepTogether(
         [
@@ -456,15 +494,24 @@ def build_story(col_w: float):
     predictive = pd.read_csv(RESULTS / "predictive_metrics.csv")
     per_class = pd.read_csv(RESULTS / "per_class_metrics.csv")
     xai = pd.read_csv(RESULTS / "explanation_summary.csv")
-    paired = pd.read_csv(RESULTS / "paired_comparisons.csv")
-    controls = pd.read_csv(RESULTS / "fidelity_control_tests.csv")
+    paired_all = pd.read_csv(RESULTS / "paired_comparisons.csv")
+    paired = paired_all[paired_all.metric.eq("deletion")]
+    faithfulness_pairs = paired_all[paired_all.metric.eq("faithfulness_correlation")]
+    controls_all = pd.read_csv(RESULTS / "fidelity_control_tests.csv")
+    controls = controls_all[controls_all.reference.eq("random")]
+    global_controls = controls_all[controls_all.reference.eq("global")]
     ablation = pd.read_csv(RESULTS / "feature_ablation.csv")
+    tuning = pd.read_csv(RESULTS / "tuning.csv")
     extended = RESULTS / "extended"
     predictive_baselines = pd.read_csv(extended / "predictive_baselines.csv")
     balancing = pd.read_csv(extended / "balancing_ablation.csv")
     calibration = pd.read_csv(extended / "calibration_summary.csv")
     masking = pd.read_csv(extended / "masking_baseline_ablation.csv")
     lime_budget = pd.read_csv(extended / "lime_budget_ablation.csv")
+    recalibration = pd.read_csv(extended / "recalibration.csv")
+    shap_background = pd.read_csv(extended / "shap_background_ablation.csv")
+    sanity = pd.read_csv(extended / "randomization_sanity.csv")
+    conflicts = pd.read_csv(extended / "label_conflicts.csv")
     with (RESULTS / "run_manifest.json").open("r", encoding="utf-8") as stream:
         manifest = json.load(stream)
     evaluation = manifest["config"]["evaluation"]
@@ -472,6 +519,37 @@ def build_story(col_w: float):
     predictive_seed_values = ", ".join(str(seed) for seed in manifest["config"]["predictive_seeds"])
     explanation_count = int(evaluation["explanation_samples"])
     lime_repeat_count = int(evaluation.get("lime_repeat_seeds", 3))
+    explanation_seed_count = len(evaluation["explanation_seeds"])
+    audit_count = int(evaluation["audit_samples"])
+    lime_budget_count = int(evaluation["lime_budget_samples"])
+    seed_sd_max = float(predictive.groupby(["dataset", "task", "model"]).macro_f1.std().max())
+    cic_metadata = manifest["datasets"]["CIC-IDS2017/binary"]
+
+    def passes(frame: pd.DataFrame, explainer: str) -> int:
+        selector = frame.explainer.eq(explainer) & (frame.holm_adjusted_p < 0.05) & (frame.ci_low > 0)
+        return int(selector.sum())
+
+    global_tree_passes = passes(global_controls, "TreeSHAP")
+    global_lime_passes = passes(global_controls, "LIME")
+    faith_shap = xai[xai.explainer.eq("TreeSHAP")].faithfulness_correlation_mean
+    faith_lime = xai[xai.explainer.eq("LIME")].faithfulness_correlation_mean
+    faith_shap_wins = int(
+        ((faithfulness_pairs.ci_low > 0) & (faithfulness_pairs.holm_adjusted_p < 0.05)).sum()
+    )
+    tuned_changed = int(tuning.groupby(["dataset", "task", "model"]).apply(
+        lambda g: int(g.loc[g.selected.eq(1), "candidate"].iloc[0] != 0)
+    ).sum())
+    sanity_summary = sanity.groupby("explainer")[
+        ["cosine_real_vs_permuted", "top5_jaccard_real_vs_permuted"]
+    ].mean()
+    shap_modes = shap_background.groupby("shap_mode").deletion_score.mean()
+
+    unsw_test_conflicts = conflicts[
+        conflicts.dataset.eq("UNSW-NB15") & conflicts.task.eq("multiclass") & conflicts.partition.eq("test")
+    ].set_index("class")
+    unsw_train_conflicts = conflicts[
+        conflicts.dataset.eq("UNSW-NB15") & conflicts.task.eq("multiclass") & conflicts.partition.eq("train")
+    ].set_index("class")
 
     pred_summary = predictive.groupby(["dataset", "task", "model"]).mean(numeric_only=True)
     cic_xgb_bin = pred_summary.loc[("CIC-IDS2017", "binary", "xgboost")]
@@ -481,6 +559,11 @@ def build_story(col_w: float):
     unsw_xgb_bin = pred_summary.loc[("UNSW-NB15", "binary", "xgboost")]
     unsw_rf_multi = pred_summary.loc[("UNSW-NB15", "multiclass", "random_forest")]
     unsw_xgb_multi = pred_summary.loc[("UNSW-NB15", "multiclass", "xgboost")]
+    validation_gap = (
+        tuning[tuning.selected.eq(1)].set_index(["dataset", "task", "model"]).validation_macro_f1
+        - pred_summary.macro_f1
+    )
+    unsw_bin_gap = float(validation_gap.loc[("UNSW-NB15", "binary")].mean())
     pair_min = paired.mean_difference_shap_minus_lime.min()
     pair_max = paired.mean_difference_shap_minus_lime.max()
     pair_p_max = paired.holm_adjusted_p.max()
@@ -525,12 +608,13 @@ def build_story(col_w: float):
     )
     unsw_metadata = manifest["datasets"]["UNSW-NB15/binary"]
     ablation_context = []
+    reduced_chosen_count = 0
     for _, group in ablation.groupby(["dataset", "task", "model"]):
         full = group.loc[group.feature_count.idxmax()]
-        reduced = group[group.feature_count.lt(full.feature_count)].sort_values("macro_f1").iloc[-1]
-        ablation_context.append(float(reduced.macro_f1 - full.macro_f1))
+        chosen = group[group.selected.eq(1)].iloc[0]
+        ablation_context.append(float(chosen.test_macro_f1 - full.test_macro_f1))
+        reduced_chosen_count += int(chosen.feature_count < full.feature_count)
     ablation_deltas = np.asarray(ablation_context)
-    reduced_noninferior_count = int((ablation_deltas >= -0.005).sum())
 
     unsw_seed42_recall = per_class[
         per_class.dataset.eq("UNSW-NB15")
@@ -546,6 +630,51 @@ def build_story(col_w: float):
             )
     minority_text = ", ".join(minority_parts)
 
+    def context_label(row) -> str:
+        return (
+            f"{'CIC' if row.dataset == 'CIC-IDS2017' else 'UNSW'} "
+            f"{'binary' if row.task == 'binary' else 'multiclass'} "
+            f"{'RF' if row.model == 'random_forest' else 'XGBoost'}"
+        )
+
+    def failed(frame: pd.DataFrame, explainer: str) -> pd.DataFrame:
+        return frame[
+            frame.explainer.eq(explainer) & ~((frame.holm_adjusted_p < 0.05) & (frame.ci_low > 0))
+        ]
+
+    lime_global_failed = failed(global_controls, "LIME")
+    lime_global_failed_labels = "; ".join(context_label(row) for row in lime_global_failed.itertuples())
+    lime_global_lift = global_controls[global_controls.explainer.eq("LIME")].mean_lift_top_minus_reference
+    shap_global_lift = global_controls[global_controls.explainer.eq("TreeSHAP")].mean_lift_top_minus_reference
+    recal_by_dataset = recalibration.groupby("dataset")[["ece_raw", "ece_isotonic"]].mean()
+    hard_classes = [name for name in ("Analysis", "Backdoor", "DoS") if name in unsw_test_conflicts.index]
+    conflict_text = ", ".join(
+        f"{name} {unsw_test_conflicts.loc[name, 'conflicting_share']:.0%}" for name in hard_classes
+    )
+    unsw_ceiling = float(unsw_test_conflicts.accuracy_ceiling.iloc[0])
+    unsw_train_ceiling = float(unsw_train_conflicts.accuracy_ceiling.iloc[0])
+    lime_xgb_fidelity = xai[xai.model.eq("xgboost") & xai.explainer.eq("LIME")].set_index(["dataset", "task"]).fidelity_mean
+    interventional_by_context = (
+        shap_background[shap_background.shap_mode.eq("interventional")]
+        .groupby(["dataset", "task"]).deletion_score.mean()
+    )
+    interventional_beats_lime = int((interventional_by_context > lime_xgb_fidelity.reindex(interventional_by_context.index)).sum())
+    sanity_by_context = sanity.groupby(["explainer", "dataset", "task", "model"]).cosine_real_vs_permuted.mean()
+    sanity_max_jaccard = float(sanity.groupby(["explainer", "dataset", "task", "model"]).top5_jaccard_real_vs_permuted.mean().max())
+    sanity_max_cosine = float(sanity_by_context.max())
+    sanity_max_label = context_label(
+        pd.Series(dict(zip(["explainer", "dataset", "task", "model"], sanity_by_context.idxmax())))
+    )
+
+    attributions = pd.read_csv(RESULTS / "attributions.csv.gz")
+    binary_xgb = attributions[
+        attributions.task.eq("binary") & attributions.model.eq("xgboost") & attributions.explainer.eq("TreeSHAP")
+    ].assign(magnitude=lambda frame: frame.attribution.abs())
+    top_features = {
+        dataset: ", ".join(group.groupby("feature").magnitude.mean().nlargest(3).index)
+        for dataset, group in binary_xgb.groupby("dataset")
+    }
+
     affiliation_line = metadata["affiliation"]
     if metadata["date"]:
         affiliation_line += f" - {metadata['date']}"
@@ -560,8 +689,7 @@ def build_story(col_w: float):
             s["author"],
         ),
         Paragraph(
-            f"<b>Abstract-</b> Machine-learning intrusion detection systems can be accurate while providing no defensible account of individual alerts. This work evaluates Random Forest and XGBoost classifiers with TreeSHAP and LIME explanations on CIC-IDS2017 and UNSW-NB15. Its distinguishing contribution is a matched, control-based protocol: on {explanation_count} common test flows per setting, explanation rankings are evaluated by top-k deletion against random and bottom-ranked controls, neighborhood stability, repeated-seed LIME stability, and explainer-call latency. Across {predictive_seed_count} model seeds, CIC binary macro-F1 reached "
-            f"{cic_xgb_bin.macro_f1:.3f}; CIC multiclass macro-F1 was {cic_rf_multi.macro_f1:.3f}-{cic_xgb_multi.macro_f1:.3f}. On a leakage-controlled derivative of the predefined UNSW split, binary macro-F1 was {unsw_rf_bin.macro_f1:.3f}-{unsw_xgb_bin.macro_f1:.3f}, while multiclass macro-F1 was {unsw_xgb_multi.macro_f1:.3f}-{unsw_rf_multi.macro_f1:.3f}. TreeSHAP produced a larger mean confidence drop than LIME in all eight paired settings (Holm-adjusted one-sided p <= {pair_p_max:.2g}); paired differences ranged from {pair_min:.3f} to {pair_max:.3f}. TreeSHAP passed {tree_passes}/8 top-versus-random controls and LIME passed {lime_passes}/8. Alternative-reference and LIME-budget audits expose intervention and sampling sensitivity, while per-alert reports reject unsupported explanations. The framework therefore mitigates operational decision opacity without claiming causal or universal interpretability.",
+            f"<b>Abstract-</b> Machine-learning intrusion detection systems can be accurate while providing no defensible account of individual alerts. This work evaluates Random Forest and XGBoost classifiers with TreeSHAP and LIME explanations on CIC-IDS2017 and UNSW-NB15 under a matched, control-based protocol: {explanation_count} common test flows per setting are explained under {explanation_seed_count} model seeds and scored by top-k deletion against random, bottom-ranked, and global-importance controls, by faithfulness correlation, by a label-randomization sanity check, and by stability and latency. Hyperparameters and feature counts are chosen on a training-only validation split. Across {predictive_seed_count} model seeds, CIC binary macro-F1 reached {cic_xgb_bin.macro_f1:.3f} and CIC multiclass {min(cic_rf_multi.macro_f1, cic_xgb_multi.macro_f1):.3f}-{max(cic_rf_multi.macro_f1, cic_xgb_multi.macro_f1):.3f}; on a leakage-controlled UNSW split, binary macro-F1 was {min(unsw_rf_bin.macro_f1, unsw_xgb_bin.macro_f1):.3f}-{max(unsw_rf_bin.macro_f1, unsw_xgb_bin.macro_f1):.3f} and multiclass {min(unsw_rf_multi.macro_f1, unsw_xgb_multi.macro_f1):.3f}-{max(unsw_rf_multi.macro_f1, unsw_xgb_multi.macro_f1):.3f}, where up to {unsw_test_conflicts.conflicting_share.max():.0%} of a class shares exact feature vectors with other labels. TreeSHAP exceeded LIME in all eight paired settings on both deletion fidelity (differences {pair_min:.3f}-{pair_max:.3f}) and faithfulness correlation (Holm-adjusted p <= {faithfulness_pairs.holm_adjusted_p.max():.2g}). TreeSHAP beat random rankings in {tree_passes}/8 and the model's own global ranking in {global_tree_passes}/8 settings; LIME did so in {lime_passes}/8 and only {global_lime_passes}/8, so most LIME rankings add little beyond global importance. Per-alert reports reject unsupported explanations; causal or universal interpretability is not claimed.",
             s["abstract"],
         ),
         Paragraph(
@@ -580,7 +708,7 @@ def build_story(col_w: float):
             s["body"],
         ),
         para(
-            "This study contributes: (1) a leakage-conscious classifier-plus-explainer pipeline spanning two datasets, two task granularities, and two tree model families; (2) a quantitative XAI protocol that tests top-ranked features against random and bottom-ranked controls; (3) paired inference with bootstrap intervals, Wilcoxon tests, Holm correction, and standardized effects; (4) deployment guidance that jointly considers fidelity, stability, tail latency, minority classes, and feature count; and (5) an operational report that exposes each alert's signed evidence and accepts it only after global and alert-specific random-ranking controls.",
+            "This study contributes: (1) a leakage-conscious classifier-plus-explainer pipeline spanning two datasets, two task granularities, and two tree model families, with every selection decision made on a training-only validation split; (2) a quantitative XAI protocol that tests top-ranked features against random, bottom-ranked, and global-importance controls, adds faithfulness correlation and a label-randomization sanity check, and repeats every explanation under five model seeds; (3) paired inference with bootstrap intervals, Wilcoxon tests, Holm correction, and standardized effects; (4) a label-conflict audit that separates model failure from unlearnable classes; (5) deployment guidance that jointly considers fidelity, stability, tail latency, minority classes, and feature count; and (6) an operational report that exposes each alert's signed evidence and accepts it only after global and alert-specific random-ranking controls.",
             s["body"],
         ),
         figure(
@@ -596,18 +724,18 @@ def build_story(col_w: float):
             s["body"],
         ),
         para(
-            "Mane and Rao demonstrated multiple explanation styles for a deep IDS but did not standardize quantitative validation [8]. Gaspar <i>et al.</i> tested whether LIME/SHAP perturbations could change IDS errors [9], while Ahmed <i>et al.</i> combined SHAP feature selection with CIC ensembles [10]. Alazab <i>et al.</i> used information gain to reduce NSL-KDD features [13], and Kasongo and Sun selected 19 UNSW features with XGBoost [14]; neither established a universal feature count. The X-IDS survey by Neupane <i>et al.</i> calls for stakeholder-specific explanations and explicit evaluation metrics [15]. Yeh <i>et al.</i> and Adebayo <i>et al.</i> further motivate objective fidelity, sensitivity, and sanity checks beyond visual plausibility [12], [16]. The distinguishing contribution here is not another SHAP/LIME visualization, but matched explainers, negative controls, robustness audits, paired uncertainty, and a reject option for alert-level evidence.",
+            "Mane and Rao demonstrated multiple explanation styles for a deep IDS but did not standardize quantitative validation [8]. Gaspar <i>et al.</i> tested whether LIME/SHAP perturbations could change IDS errors [9], while Ahmed <i>et al.</i> combined SHAP feature selection with CIC ensembles [10]. Alazab <i>et al.</i> used information gain to reduce NSL-KDD features [13], and Kasongo and Sun selected 19 UNSW features with XGBoost [14]; neither established a universal feature count. The X-IDS survey by Neupane <i>et al.</i> calls for stakeholder-specific explanations and explicit evaluation metrics [15]. Closest to this work, Arreche <i>et al.</i> compare SHAP and LIME for network IDSs on descriptive accuracy, sparsity, stability, efficiency, robustness, and completeness [17]. Yeh <i>et al.</i> and Adebayo <i>et al.</i> further motivate objective fidelity, sensitivity, and sanity checks beyond visual plausibility [12], [16]. The distinguishing contribution here is not another SHAP/LIME visualization, but matched explainers across model seeds, random and global-importance negative controls, faithfulness correlation [18], a data-randomization sanity check, paired uncertainty, and a reject option for alert-level evidence.",
             s["body"],
         ),
         section("III", "Methodology", s["section"]),
         subsection("A", "Research Questions", s["subsection"]),
         para(
-            "RQ1 asks how RF and XGBoost perform across datasets and task granularities. RQ2 asks whether deleting an explainer's top features reduces confidence more than deleting random or bottom-ranked features. RQ3 asks whether nearby same-prediction flows receive compatible explanations. RQ4 asks whether latency supports offline, analyst-on-demand, or near-real-time use. RQ5 asks whether conclusions persist across models, datasets, tasks, feature counts, and predictive seeds.",
+            "RQ1 asks how RF and XGBoost perform across datasets and task granularities. RQ2 asks whether deleting an explainer's top features reduces confidence more than deleting random, bottom-ranked, or globally important features, and whether attribution mass tracks the effect of masking. RQ3 asks whether nearby same-prediction flows receive compatible explanations. RQ4 asks whether latency supports offline, analyst-on-demand, or near-real-time use. RQ5 asks whether conclusions persist across models, datasets, tasks, feature counts, and predictive seeds.",
             s["body"],
         ),
         subsection("B", "Data and Leakage Controls", s["subsection"]),
         para(
-            f"The UNSW experiment begins from the predefined 175,341/82,332 training/testing files. Audit found within-partition duplication and exact feature vectors shared across files; exact rows were deduplicated and {unsw_metadata['cross_partition_feature_overlaps_removed_from_test']:,} overlapping test vectors were removed, leaving {unsw_metadata['clean_training_rows']:,}/{unsw_metadata['clean_testing_rows']:,} rows. The accessible CIC representation contains all 2,830,743 flows and 28 selected features but omits day and timestamp metadata. To control computation while retaining minority labels, at most 25,000 rows per label were sampled, 15,103 sampled duplicates were removed, and the remaining 124,513 rows were split 80/20 with label stratification. Neither dataset result is claimed as temporal generalization evidence.",
+            f"The UNSW experiment begins from the predefined 175,341/82,332 training/testing files. Audit found within-partition duplication and exact feature vectors shared across files; exact rows were deduplicated and {unsw_metadata['cross_partition_feature_overlaps_removed_from_test']:,} overlapping test vectors were removed, leaving {unsw_metadata['clean_training_rows']:,}/{unsw_metadata['clean_testing_rows']:,} rows. The accessible CIC representation contains all 2,830,743 flows and 28 selected features but omits day and timestamp metadata. To control computation while retaining minority labels, at most 25,000 rows per label were sampled, {cic_metadata['duplicates_removed_after_sampling']:,} sampled duplicates were removed, and the remaining {cic_metadata['sampled_rows_after_deduplication']:,} rows were split 80/20 with label stratification. Neither dataset result is claimed as temporal generalization evidence.",
             s["body"],
         ),
         para(
@@ -618,14 +746,14 @@ def build_story(col_w: float):
         Spacer(1, 4),
         subsection("C", "Models and Predictive Measures", s["subsection"]),
         para(
-            f"RF uses 120 trees, maximum depth 18, minimum leaf size 2, and balanced bootstrap class weights [4]. XGBoost uses 160 depth-7 trees, learning rate 0.08, 0.85 row/column subsampling, histogram training, and balanced sample weights [5]. Models are repeated with seeds {predictive_seed_values}. Accuracy, balanced accuracy, macro-F1, weighted-F1, per-class precision/recall/F1, confusion matrices, and binary PR-AUC, false-positive rate (FPR), and false-negative rate (FNR) are reported.",
+            f"RF uses balanced bootstrap class weights [4]; XGBoost uses histogram training, 0.85 row/column subsampling, and balanced sample weights [5]. For each dataset, task, and model, eight candidate settings (Table II), the prespecified one first, are fitted on {1 - manifest['config']['tuning']['validation_size']:.0%} of the training rows and compared by macro-F1 on the remaining stratified {manifest['config']['tuning']['validation_size']:.0%}; ties keep the earlier candidate. The selected setting, which differed from the prespecified one in {tuned_changed}/8 contexts, is refitted on all training rows with seeds {predictive_seed_values}. The test partition is never used for selection. Accuracy, balanced accuracy, macro-F1, weighted-F1, per-class precision/recall/F1, confusion matrices, and binary PR-AUC, false-positive rate (FPR), and false-negative rate (FNR) are reported.",
             s["body"],
         ),
-        experiment_settings_table(col_w, s, evaluation),
+        experiment_settings_table(col_w, s, evaluation, manifest["config"]),
         Spacer(1, 4),
         subsection("D", "Explanation Metrics", s["subsection"]),
         para(
-            f"For each configuration, the seed-42 model explains the same {explanation_count} fixed, label-stratified test flows with both methods; available binary true-positive, false-positive, true-negative, and false-negative cases are explicitly represented. Attributions are converted to signed vectors in the original feature order. For an input <i>x</i>, predicted class <i>c</i>, feature ranking <i>r</i>, and training baseline <i>b</i>, the deletion score at <i>k</i> is",
+            f"For each configuration, the same {explanation_count} fixed, label-stratified test flows, chosen once from the seed-42 model, are explained by both methods under each of the {explanation_seed_count} model seeds; available binary true-positive, false-positive, true-negative, and false-negative cases are explicitly represented. Attributions are converted to signed vectors in the original feature order. For an input <i>x</i>, predicted class <i>c</i>, feature ranking <i>r</i>, and training baseline <i>b</i>, the deletion score at <i>k</i> is",
             s["body"],
         ),
         para(
@@ -633,7 +761,7 @@ def build_story(col_w: float):
             s["equation"],
         ),
         para(
-            "The primary fidelity score averages D<sub>k</sub> for k in {1,3,5,10}. The same calculation uses a fixed random ranking and the bottom attribution ranking as controls. Flip rate records whether masking changes the predicted class. Paired SHAP-minus-LIME differences are bootstrapped over shared instances with 2,000 resamples.",
+            f"The primary fidelity score averages D<sub>k</sub> for k in {{1,3,5,10}}. The same calculation uses three controls: a fixed random ranking, the bottom attribution ranking, and a global ranking given by the model's own feature importances, identical for every flow. A local explanation that cannot beat the global ranking adds no per-alert information. Flip rate records whether masking changes the predicted class. Because deletion only probes the head of the ranking, faithfulness correlation [18] is also computed: {evaluation['faithfulness_subsets']} random subsets of {evaluation['faithfulness_subset_size']} features are masked per flow, and the Pearson correlation between each subset's summed attribution and its probability drop is recorded. Per-flow scores are averaged over model seeds before 2,000 paired bootstrap resamples over flows.",
             s["body"],
         ),
         para(
@@ -646,7 +774,7 @@ def build_story(col_w: float):
         ),
         subsection("E", "Statistical Analysis and Decision Rules", s["subsection"]),
         para(
-            "Because TreeSHAP and LIME explain identical flows, the primary comparison uses within-flow differences in mean top-k deletion score. The mean difference and a percentile 95% confidence interval are obtained with 2,000 paired bootstrap resamples. The prespecified directional hypothesis (TreeSHAP fidelity greater than LIME) is tested with a one-sided Wilcoxon signed-rank test. Holm's step-down procedure controls family-wise error across the eight dataset-task-model comparisons. The same correction is applied to 16 top-versus-random control tests. Statistical significance requires adjusted p < 0.05; practical importance is reported as the raw probability-drop difference and paired d<sub>z</sub>, defined as the mean paired difference divided by its sample standard deviation. These quantities describe the fixed evaluation sample and intervention, not a population of future networks.",
+            "Because TreeSHAP and LIME explain identical flows, the primary comparison uses within-flow differences in mean top-k deletion score. The mean difference and a percentile 95% confidence interval are obtained with 2,000 paired bootstrap resamples. The prespecified directional hypothesis (TreeSHAP fidelity greater than LIME) is tested with a one-sided Wilcoxon signed-rank test. Holm's step-down procedure controls family-wise error within each family: eight deletion comparisons, eight two-sided faithfulness-correlation comparisons (a metric added after the original protocol), 16 top-versus-random tests, and 16 top-versus-global tests. Statistical significance requires adjusted p < 0.05; practical importance is reported as the raw probability-drop difference and paired d<sub>z</sub>, defined as the mean paired difference divided by its sample standard deviation. These quantities describe the fixed evaluation sample and intervention, not a population of future networks.",
             s["body"],
         ),
         figure(
@@ -661,7 +789,7 @@ def build_story(col_w: float):
         predictive_table(predictive, "CIC-IDS2017", col_w, s),
         Spacer(1, 4),
         para(
-            f"CIC binary detection is strong: XGBoost achieves {cic_xgb_bin.accuracy:.4f} accuracy and {cic_xgb_bin.macro_f1:.4f} macro-F1 with FPR {cic_xgb_bin.false_positive_rate:.4f} and FNR {cic_xgb_bin.false_negative_rate:.4f}. Multiclass performance remains high but lower, with macro-F1 {cic_rf_multi.macro_f1:.4f} for RF and {cic_xgb_multi.macro_f1:.4f} for XGBoost. Seed standard deviations are at most 0.0036 macro-F1, indicating low training randomness relative to dataset effects.",
+            f"CIC binary detection is strong: XGBoost achieves {cic_xgb_bin.accuracy:.4f} accuracy and {cic_xgb_bin.macro_f1:.4f} macro-F1 with FPR {cic_xgb_bin.false_positive_rate:.4f} and FNR {cic_xgb_bin.false_negative_rate:.4f}. Multiclass performance remains high but lower, with macro-F1 {cic_rf_multi.macro_f1:.4f} for RF and {cic_xgb_multi.macro_f1:.4f} for XGBoost. Seed standard deviations are at most {seed_sd_max:.4f} macro-F1, indicating low training randomness relative to dataset effects.",
             s["body"],
         ),
         predictive_table(predictive, "UNSW-NB15", col_w, s),
@@ -676,21 +804,21 @@ def build_story(col_w: float):
         xai_table(xai, paired, "UNSW-NB15", col_w, s),
         Spacer(1, 4),
         para(
-            f"TreeSHAP has higher median/mode-baseline top-k deletion fidelity than LIME in every configuration. Paired mean improvements range from {pair_min:.3f} to {pair_max:.3f}; all eight bootstrap intervals exclude zero, paired d<sub>z</sub> ranges from {pair_dz_min:.3f} to {pair_dz_max:.3f}, and every Holm-adjusted one-sided p-value is at most {pair_p_max:.2g}. Thus, the ranking comparison is consistent and statistically supported under the prespecified intervention.",
+            f"TreeSHAP has higher median/mode-baseline top-k deletion fidelity than LIME in every configuration. Paired mean improvements range from {pair_min:.3f} to {pair_max:.3f}; all eight bootstrap intervals exclude zero, paired d<sub>z</sub> ranges from {pair_dz_min:.3f} to {pair_dz_max:.3f}, and every Holm-adjusted one-sided p-value is at most {pair_p_max:.2g}. Faithfulness correlation agrees across the whole ranking: TreeSHAP averages {faith_shap.min():.2f}-{faith_shap.max():.2f} against {faith_lime.min():.2f}-{faith_lime.max():.2f} for LIME, and the paired difference is significant in {faith_shap_wins}/8 configurations.",
             s["body"],
         ),
         para(
-            f"The control analysis is stricter. TreeSHAP's top-ranked features outperform random masking in {tree_passes}/8 configurations after Holm correction; LIME passes in {lime_passes}/8. The failed LIME context is {failed_lime_labels}; its ranking is not demonstrably better than random under the 350-sample perturbation budget.",
+            f"The control analysis is stricter. Against random rankings, TreeSHAP passes in {tree_passes}/8 configurations after Holm correction and LIME in {lime_passes}/8 (failing for {failed_lime_labels or 'none'}). The global-importance control separates the explainers more sharply: TreeSHAP's per-flow rankings beat the model's own global ranking in {global_tree_passes}/8 configurations (mean lift {shap_global_lift.min():.3f}-{shap_global_lift.max():.3f}), whereas LIME does so in only {global_lime_passes}/8, with lifts of {lime_global_lift.min():+.3f} to {lime_global_lift.max():+.3f}. In {lime_global_failed_labels}, an analyst would learn as much from one fixed importance list as from LIME's per-alert explanation.",
             s["body"],
         ),
         para(
-            f"TreeSHAP's neighborhood cosine similarity ranges from {shap_stability.min():.3f} to {shap_stability.max():.3f}, compared with {lime_stability.min():.3f} to {lime_stability.max():.3f} for LIME. The findings reject the idea that a single attractive local bar chart is sufficient validation: an explainer can look plausible while failing a random deletion control or changing materially across nearby flows.",
+            f"TreeSHAP's neighborhood cosine similarity ranges from {shap_stability.min():.3f} to {shap_stability.max():.3f}, compared with {lime_stability.min():.3f} to {lime_stability.max():.3f} for LIME. The findings reject the idea that a single attractive local bar chart is sufficient validation: an explainer can look plausible while failing a negative control or changing materially across nearby flows.",
             s["body"],
         ),
         figure(
             RESULTS / "figures" / "paper_paired_fidelity.png",
             col_w,
-            "Paired TreeSHAP-minus-LIME fidelity differences. Every 95% bootstrap interval lies above zero; p-values in Tables V-VI are Holm-adjusted Wilcoxon results.",
+            "Paired TreeSHAP-minus-LIME differences in deletion fidelity (top) and faithfulness correlation (bottom) over shared flows, averaged across model seeds, with 95% bootstrap intervals. Deletion p-values in Tables V-VI are Holm-adjusted Wilcoxon results; FC is mean faithfulness correlation.",
             3,
             s["caption"],
         ),
@@ -708,7 +836,7 @@ def build_story(col_w: float):
         ),
         subsection("D", "Feature-Count Ablation and Error Analysis", s["subsection"]),
         para(
-            f"Feature reduction can preserve performance, but the useful count is context-specific. The best tested reduced set is within 0.005 macro-F1 of the full model in {reduced_noninferior_count}/8 contexts; reduced-minus-full changes range from {ablation_deltas.min():+.3f} to {ablation_deltas.max():+.3f}. Because these are seed-42 exploratory test-set comparisons rather than nested model selection, they motivate feature-count curves but do not establish a universally optimal k.",
+            f"The feature count is chosen on the validation split as the smallest tested count whose validation macro-F1 is within 0.005 of the full model; the test partition is used only to report the chosen count. A reduced set is chosen in {reduced_chosen_count}/8 contexts, and chosen-minus-full test macro-F1 ranges from {ablation_deltas.min():+.3f} to {ablation_deltas.max():+.3f}. The useful count remains context-specific, so no universally optimal k is implied.",
             s["body"],
         ),
         ablation_table(ablation, col_w, s),
@@ -716,38 +844,39 @@ def build_story(col_w: float):
         figure(
             RESULTS / "figures" / "feature_ablation.png",
             col_w,
-            "Feature-count ablation. Rankings come from the frozen full model; each reduced model is retrained with seed 42.",
+            "Feature-count ablation on test data. Rankings come from a model fitted on the training fit split; each subset is retrained with seed 42, and the reported count is chosen on validation data.",
             5,
             s["caption"],
         ),
         para(
-            f"UNSW minority failures remain operationally important. Seed-42 recall for selected difficult classes is {minority_text}. CIC errors concentrate in Web Attack classes, but supports are small, so those rates have high sampling uncertainty. Global attributions are dataset-specific: CIC XGBoost repeatedly emphasizes Destination Port, backward packet-length variability, and initial TCP window bytes, whereas UNSW emphasizes load/byte features, service, and recent destination/source-port counts.",
+            f"UNSW minority failures remain operationally important. Seed-42 recall for selected difficult classes is {minority_text}. The label-conflict audit shows that much of this error is unlearnable from the supplied features: in the test partition, {conflict_text} of rows share an exact feature vector with a differently labelled row, which caps achievable multiclass accuracy at {unsw_ceiling:.3f} on test and {unsw_train_ceiling:.3f} on training data. These classes should be reported as dataset limitations rather than model deficits. CIC errors concentrate in Web Attack classes, but supports are small, so those rates have high sampling uncertainty. Global attributions are dataset-specific: averaged over the explained flows, binary XGBoost TreeSHAP ranks {top_features['CIC-IDS2017']} highest on CIC, but {top_features['UNSW-NB15']} on UNSW.",
             s["body"],
         ),
         figure(
             RESULTS / "figures" / "paper_unsw_recall.png",
             col_w,
-            "UNSW-NB15 multiclass recall at seed 42. Analysis, Backdoor, and DoS remain weak despite acceptable weighted averages.",
+            "UNSW-NB15 multiclass recall at seed 42 beside each class's label-conflict share (test rows whose exact feature vector also carries another label). The weakest classes are those with the most conflicting rows.",
             6,
             s["caption"],
         ),
         subsection("E", "Literature-Driven Robustness Audits", s["subsection"]),
         robustness_table(
-            predictive_baselines, balancing, calibration, masking, lime_budget, col_w, s
+            predictive_baselines, balancing, calibration, masking, lime_budget,
+            recalibration, shap_background, sanity, conflicts, col_w, s,
         ),
         para(
-            f"Both full model families exceed the majority and depth-5 tree baselines. With identical seed 42 fits, class weighting improves macro-F1 in {weighted_wins}/8 contexts, so balancing is not universally beneficial. Seed-42 binary expected calibration error is {calibration[calibration.dataset.eq('CIC-IDS2017')].expected_calibration_error.min():.3f}-{calibration[calibration.dataset.eq('CIC-IDS2017')].expected_calibration_error.max():.3f} on CIC and {calibration[calibration.dataset.eq('UNSW-NB15')].expected_calibration_error.min():.3f}-{calibration[calibration.dataset.eq('UNSW-NB15')].expected_calibration_error.max():.3f} on UNSW. On 12 flows per configuration, TreeSHAP deletion remains large with median/mode ({mask_mean['training_median_mode']:.3f}), zero ({mask_mean['zero']:.3f}), marginal-row ({mask_mean['marginal_training_row']:.3f}), and nearest-opposite ({mask_mean['nearest_opposite_prediction']:.3f}) references, but collapses for nearest same-prediction replacement ({mask_mean['nearest_same_prediction']:.3f}); fidelity is therefore an intervention-specific estimand. On six flows per configuration and five repeats, increasing LIME from 100 to 700 samples raises pooled self-stability from {lime_budget_summary.loc[100].stability:.3f} to {lime_budget_summary.loc[700].stability:.3f}, while median latency rises from {lime_budget_summary.loc[100].latency:.1f} to {lime_budget_summary.loc[700].latency:.1f} ms and fidelity changes little.",
+            f"Both full model families exceed the majority and depth-5 tree baselines. With identical seed 42 fits, class weighting improves macro-F1 in {weighted_wins}/8 contexts, so balancing is not universally beneficial. Seed-42 binary expected calibration error is {calibration[calibration.dataset.eq('CIC-IDS2017')].expected_calibration_error.min():.3f}-{calibration[calibration.dataset.eq('CIC-IDS2017')].expected_calibration_error.max():.3f} on CIC and {calibration[calibration.dataset.eq('UNSW-NB15')].expected_calibration_error.min():.3f}-{calibration[calibration.dataset.eq('UNSW-NB15')].expected_calibration_error.max():.3f} on UNSW. On {audit_count} flows per configuration, TreeSHAP deletion remains large with median/mode ({mask_mean['training_median_mode']:.3f}), zero ({mask_mean['zero']:.3f}), marginal-row ({mask_mean['marginal_training_row']:.3f}), and nearest-opposite ({mask_mean['nearest_opposite_prediction']:.3f}) references, but collapses for nearest same-prediction replacement ({mask_mean['nearest_same_prediction']:.3f}); fidelity is therefore an intervention-specific estimand. On {lime_budget_count} flows per configuration and {lime_repeat_count} repeats, increasing LIME from 100 to 700 samples raises pooled self-stability from {lime_budget_summary.loc[100].stability:.3f} to {lime_budget_summary.loc[700].stability:.3f}, while median latency rises from {lime_budget_summary.loc[100].latency:.1f} to {lime_budget_summary.loc[700].latency:.1f} ms and mean deletion fidelity from {lime_budget_summary.loc[100].fidelity:.3f} to {lime_budget_summary.loc[700].fidelity:.3f}, still below TreeSHAP. Isotonic recalibration fitted on validation data lowers mean ECE from {recal_by_dataset.loc['CIC-IDS2017', 'ece_raw']:.3f} to {recal_by_dataset.loc['CIC-IDS2017', 'ece_isotonic']:.3f} on CIC but only from {recal_by_dataset.loc['UNSW-NB15', 'ece_raw']:.3f} to {recal_by_dataset.loc['UNSW-NB15', 'ece_isotonic']:.3f} on UNSW, where validation macro-F1 exceeds binary test macro-F1 by {unsw_bin_gap:.3f}: the predefined UNSW partitions differ in distribution, so calibration learned on training data transfers poorly. For XGBoost, interventional TreeSHAP with a 100-row background [19] gives mean deletion {shap_modes['interventional']:.3f} versus {shap_modes['path_dependent']:.3f} for the default path-dependent mode, with the ordering varying by dataset; interventional TreeSHAP still exceeds LIME's mean deletion in {interventional_beats_lime}/{len(interventional_by_context)} XGBoost configurations, so the explainer comparison does not hinge on the background choice. In the label-randomization sanity check [16], explanations of the real model and of a model trained on permuted labels have a mean top-5 Jaccard overlap of {sanity_summary.loc['TreeSHAP', 'top5_jaccard_real_vs_permuted']:.2f} (TreeSHAP) and {sanity_summary.loc['LIME', 'top5_jaccard_real_vs_permuted']:.2f} (LIME), at most {sanity_max_jaccard:.2f} in any configuration, so both explainers respond to what the model learned rather than to input structure alone. Signed cosine is also low except for {sanity_max_label} ({sanity_max_cosine:.2f}), where both models weight the same high-variance features.",
             s["body"],
         ),
         section("V", "Discussion", s["section"]),
         subsection("A", "Answers to the Research Questions", s["subsection"]),
         para(
-            "RQ1: RF and XGBoost beat simple baselines and are nearly tied on CIC and UNSW binary tasks, but neither solves UNSW multiclass detection. RQ2: TreeSHAP clears the random control in every configuration and exceeds LIME under the primary baseline, although absolute deletion depends on the reference intervention. RQ3: TreeSHAP is more neighbor-consistent within the selected subsets; LIME stability improves with sampling budget. RQ4: no explainer has a universal latency advantage. RQ5: the paired TreeSHAP ranking advantage persists across all tested contexts, while calibration, balancing, feature count, masking magnitude, and latency remain context-dependent.",
+            f"RQ1: validation-tuned RF and XGBoost beat simple baselines and are nearly tied, but UNSW multiclass detection is bounded by label conflicts in the data. RQ2: TreeSHAP clears the random control in {tree_passes}/8 and the global-importance control in {global_tree_passes}/8 configurations and exceeds LIME on deletion and faithfulness correlation everywhere; LIME clears the global control in only {global_lime_passes}/8. Absolute deletion still depends on the reference intervention. RQ3: TreeSHAP is more neighbor-consistent within the selected subsets; LIME stability improves with sampling budget. RQ4: no explainer has a universal latency advantage. RQ5: the paired TreeSHAP advantage persists across datasets, tasks, models, and five model seeds, while calibration, balancing, feature count, masking magnitude, and latency remain context-dependent.",
             s["body"],
         ),
         subsection("B", "Why the Explainers Differ", s["subsection"]),
         para(
-            "TreeSHAP exploits the fitted tree structure and allocates credit consistently under its conditional-expectation assumptions. LIME instead samples a local neighborhood, discretizes features, and fits a surrogate. In mixed continuous/categorical flow spaces, that synthetic neighborhood may not match the data manifold; limited sampling also introduces variance. These mechanisms plausibly explain TreeSHAP's stronger fidelity and stability, but the experiment does not isolate which LIME component is responsible. Attribution magnitudes are not compared directly across methods because SHAP values and surrogate coefficients have different scales; only rankings and downstream behavioral tests are compared.",
+            "TreeSHAP exploits the fitted tree structure and allocates credit consistently under its conditional-expectation assumptions. LIME instead samples a local neighborhood, discretizes features, and fits a surrogate. In mixed continuous/categorical flow spaces, that synthetic neighborhood may not match the data manifold; limited sampling also introduces variance. These mechanisms plausibly explain TreeSHAP's stronger fidelity and stability, and why LIME's rankings often collapse toward the features the model uses everywhere, which the global control then cannot distinguish from a fixed importance list. The experiment does not isolate which LIME component is responsible. Attribution magnitudes are not compared directly across methods because SHAP values and surrogate coefficients have different scales; only rankings and downstream behavioral tests are compared.",
             s["body"],
         ),
         subsection("C", "Operational Meaning", s["subsection"]),
@@ -757,7 +886,7 @@ def build_story(col_w: float):
         ),
         section("VI", "Deployment Recommendations", s["section"]),
         para(
-            f"Classification should run on every flow, while explanation generation should be policy-triggered. XGBoost plus TreeSHAP is the strongest measured low-latency candidate because it combines high primary fidelity with {xgb_shap_latency.min():.1f}-{xgb_shap_latency.max():.1f} ms median explainer-call time. CIC RF plus TreeSHAP is suitable for analyst-on-demand use. UNSW RF TreeSHAP should be reserved for lower-volume investigation unless its {unsw_rf_multi_xai.loc['TreeSHAP'].latency_p95_ms:.1f} ms multiclass tail is acceptable. LIME can be faster than RF TreeSHAP, but {len(failed_lime)} tested ranking fails the random control; speed alone does not justify deployment.",
+            f"Classification should run on every flow, while explanation generation should be policy-triggered. XGBoost plus TreeSHAP is the strongest measured low-latency candidate because it combines high primary fidelity with {xgb_shap_latency.min():.1f}-{xgb_shap_latency.max():.1f} ms median explainer-call time. CIC RF plus TreeSHAP is suitable for analyst-on-demand use. UNSW RF TreeSHAP should be reserved for lower-volume investigation unless its {unsw_rf_multi_xai.loc['TreeSHAP'].latency_p95_ms:.1f} ms multiclass tail is acceptable. LIME can be faster than RF TreeSHAP, but its rankings fail the random control in {len(failed_lime)} and the global-importance control in {len(lime_global_failed)} of 8 configurations; speed alone does not justify deployment.",
             s["body"],
         ),
         para(
@@ -767,7 +896,7 @@ def build_story(col_w: float):
         section("VII", "Threats to Validity", s["section"]),
         subsection("A", "Data and External Validity", s["subsection"]),
         para(
-            "The CIC mirror contains a 28-feature preprocessing and no day metadata; therefore, its stratified split can still benefit from capture-specific artifacts and should not be interpreted as temporal generalization. Sampling was performed before deduplication to control memory, although duplicates were removed before splitting. UNSW uses a predefined partition derived from one testbed rather than a documented temporal holdout. Duplicate and cross-partition overlap removal reduces direct leakage but cannot make either benchmark representative of a live network.",
+            "The CIC mirror contains a 28-feature preprocessing and no day metadata; therefore, its stratified split can still benefit from capture-specific artifacts and should not be interpreted as temporal generalization. Sampling was performed before deduplication to control memory, although duplicates were removed before splitting. Engelen <i>et al.</i> reconstructed or relabelled more than 20% of CIC-IDS2017 flows after finding flow-construction and labelling errors [20]; the accessible mirror predates that correction, so CIC scores may partly reflect those artifacts. UNSW uses a predefined partition derived from one testbed rather than a documented temporal holdout. Duplicate and cross-partition overlap removal reduces direct leakage but cannot make either benchmark representative of a live network.",
             s["body"],
         ),
         subsection("B", "Construct Validity", s["subsection"]),
@@ -777,12 +906,12 @@ def build_story(col_w: float):
         ),
         subsection("C", "Statistical Validity", s["subsection"]),
         para(
-            f"Explanation inference uses {explanation_count} matched flows per configuration. Paired analysis and multiplicity correction improve efficiency and false-positive control, but intervals describe the selected flows rather than repeated datasets. Flow-level resampling also treats selected flows as independent even though shared sessions or capture conditions may induce dependence, so intervals may be optimistic. The neighbor metric searches only within those selected flows and uses standardized Euclidean distance on a mixed encoded feature space. Feature-count results are exploratory because the reported best k is identified on the test results. Rare classes have small support. The {predictive_seed_count} predictive seeds quantify algorithmic variation, not uncertainty caused by alternative captures, preprocessing pipelines, or hyperparameter searches.",
+            f"Explanation inference uses {explanation_count} matched flows per configuration, each explained under {explanation_seed_count} model seeds. Paired analysis and multiplicity correction improve efficiency and false-positive control, but intervals describe the selected flows rather than repeated datasets. Flow-level resampling also treats selected flows as independent even though shared sessions or capture conditions may induce dependence, so intervals may be optimistic. The neighbor metric searches only within those selected flows and uses standardized Euclidean distance on a mixed encoded feature space. Rare classes have small support. The {predictive_seed_count} predictive seeds quantify algorithmic variation, not uncertainty caused by alternative captures, preprocessing pipelines, or hyperparameter searches.",
             s["body"],
         ),
         subsection("D", "Scope", s["subsection"]),
         para(
-            "Only tree classifiers and two post-hoc explainers are evaluated. The LIME budget audit covers 100-700 samples but not alternative kernels or discretizers. The calibration audit diagnoses raw probabilities but does not recalibrate them. SMOTE is omitted because interpolating encoded categorical flow fields can create invalid traffic; weighting versus no weighting is reported instead. Deep models, counterfactuals, calibrated thresholds, drift, adversarial manipulation, causal claims, and analyst studies remain outside scope.",
+            "Only tree classifiers and two post-hoc explainers are evaluated. The LIME budget audit covers 100-700 samples but not alternative kernels or discretizers. Recalibration is evaluated but not applied to the alert scores. SMOTE is omitted because interpolating encoded categorical flow fields can create invalid traffic; weighting versus no weighting is reported instead. Deep models, counterfactuals, calibrated thresholds, drift, adversarial manipulation, causal claims, and analyst studies remain outside scope.",
             s["body"],
         ),
         subsection("E", "Ethics and Artifact Availability", s["subsection"]),
@@ -792,12 +921,12 @@ def build_story(col_w: float):
         ),
         section("VIII", "Reproducibility", s["section"]),
         para(
-            f"The run used Python {manifest['environment']['python']}, scikit-learn {manifest['environment']['scikit_learn']}, XGBoost {manifest['environment']['xgboost']}, and SHAP {manifest['environment']['shap']} on Windows 11 with {manifest['environment']['logical_cpu_count']} logical AMD64 CPUs. The artifact stores the fixed configuration, package pins, SHA-256 source hashes, row and deduplication audits, per-instance metrics, comparisons, plots, unit tests, cross-artifact checks, and a machine-readable manifest. Models use the declared fixed settings; no automated hyperparameter search is reported. Scripts regenerate excluded raw-data and serialized-model artifacts from locally supplied inputs.",
+            f"The run used Python {manifest['environment']['python']}, scikit-learn {manifest['environment']['scikit_learn']}, XGBoost {manifest['environment']['xgboost']}, and SHAP {manifest['environment']['shap']} on {manifest['environment']['platform'].split('-')[0]} with {manifest['environment']['logical_cpu_count']} logical CPUs. The artifact stores the fixed configuration, package pins, SHA-256 source hashes, row and deduplication audits, per-instance metrics, comparisons, plots, unit tests, cross-artifact checks, and a machine-readable manifest. Hyperparameters come from the recorded validation-split search (tuning.csv), and the selected settings are stored in the manifest. Scripts regenerate excluded raw-data and serialized-model artifacts from locally supplied inputs.",
             s["body"],
         ),
         section("IX", "Conclusion", s["section"]),
         para(
-            f"This study addresses black-box IDS decisions within a defined operational scope by evaluating detection and explanation as one system and producing rejectable per-alert evidence. TreeSHAP exceeds LIME in all eight primary paired comparisons, clears {tree_passes}/8 random-ranking controls, and has higher measured neighborhood consistency within the selected subsets; LIME clears {lime_passes}/8. Baseline, balancing, calibration, masking-reference, sampling-budget, class/error, feature-count, and latency audits expose where conclusions do and do not generalize. The transparency report converts this evidence into auditable alerts, but reference sensitivity confirms that post-hoc attribution is not causal or universal interpretability. Future work should add realistic conditional interventions, probability recalibration, capture-aware resampling, drift tests, more explainers, and an analyst study.",
+            f"This study addresses black-box IDS decisions within a defined operational scope by evaluating detection and explanation as one system and producing rejectable per-alert evidence. Under a protocol with validation-only selection, 200 matched flows, and five model seeds, TreeSHAP exceeds LIME in all eight paired comparisons on both deletion fidelity and faithfulness correlation, clears {tree_passes}/8 random and {global_tree_passes}/8 global-importance controls, and has higher neighborhood consistency; LIME clears {lime_passes}/8 and {global_lime_passes}/8. Both explainers pass a label-randomization sanity check. The weakest UNSW classes are largely unlearnable from the supplied features, which the label-conflict audit makes explicit. The transparency report converts this evidence into auditable alerts, but reference sensitivity confirms that post-hoc attribution is not causal or universal interpretability. Future work should add realistic conditional interventions, corrected CIC-IDS2017 flows [20], capture-aware resampling, drift tests, more explainers, and an analyst study.",
             s["body"],
         ),
         section("REFERENCES", "", s["section"]),
@@ -820,6 +949,10 @@ def build_story(col_w: float):
         "[14] S. M. Kasongo and Y. Sun, \"Performance analysis of intrusion detection systems using a feature selection method on the UNSW-NB15 dataset,\" <i>Journal of Big Data</i>, vol. 7, art. no. 105, 2020, doi: 10.1186/s40537-020-00379-6.",
         "[15] S. Neupane <i>et al.</i>, \"Explainable intrusion detection systems (X-IDS): A survey of current methods, challenges, and opportunities,\" <i>IEEE Access</i>, vol. 10, pp. 112392-112415, 2022, doi: 10.1109/ACCESS.2022.3216617.",
         "[16] J. Adebayo, J. Gilmer, M. Muelly, I. Goodfellow, M. Hardt, and B. Kim, \"Sanity checks for saliency maps,\" in <i>Advances in Neural Information Processing Systems</i>, vol. 31, 2018.",
+        "[17] O. Arreche, T. R. Guntur, J. W. Roberts, and M. Abdallah, \"E-XAI: Evaluating black-box explainable AI frameworks for network intrusion detection,\" <i>IEEE Access</i>, vol. 12, pp. 23954-23988, 2024, doi: 10.1109/ACCESS.2024.3365140.",
+        "[18] U. Bhatt, A. Weller, and J. M. F. Moura, \"Evaluating and aggregating feature-based model explanations,\" in <i>Proc. 29th Int. Joint Conf. Artificial Intelligence (IJCAI)</i>, 2020, pp. 3016-3022, doi: 10.24963/ijcai.2020/417.",
+        "[19] H. Chen, J. D. Janizek, S. Lundberg, and S.-I. Lee, \"True to the model or true to the data?\" arXiv:2006.16234, 2020.",
+        "[20] G. Engelen, V. Rimmer, and W. Joosen, \"Troubleshooting an intrusion detection dataset: The CICIDS2017 case study,\" in <i>Proc. IEEE Security and Privacy Workshops (SPW)</i>, 2021, pp. 7-12, doi: 10.1109/SPW53761.2021.00009.",
     ]
     story.extend(Paragraph(reference, s["reference"]) for reference in references)
     return story
