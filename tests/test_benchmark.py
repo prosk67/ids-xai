@@ -10,12 +10,15 @@ from src.xai_ids.benchmark import (
     bootstrap_mean_ci,
     candidate_params,
     choose_feature_count,
+    evaluate_explainer,
+    faithfulness_correlation,
     fidelity_control_tests,
     fidelity_rows,
     nearest_neighbor_stability,
     safe_cosine,
     select_hyperparameters,
     split_validation,
+    summarize_explanations,
 )
 from src.xai_ids.transparency import evidence_decision
 
@@ -197,6 +200,64 @@ class BenchmarkUnitTests(unittest.TestCase):
         result = fidelity_control_tests(pd.DataFrame(records), seed=0)
         self.assertEqual(set(result["reference"]), {"random", "global"})
         self.assertTrue((result["ci_low"] > 0).all())
+
+
+    def test_faithfulness_correlation_is_high_for_true_linear_weights(self):
+        from sklearn.linear_model import LogisticRegression
+
+        rng = np.random.default_rng(4)
+        x = rng.normal(size=(500, 6))
+        y = (x @ np.array([3.0, -2.0, 1.0, 0.5, 0.0, 0.0]) > 0).astype(int)
+        model = LogisticRegression().fit(x, y)
+        row = x[0]
+        predicted = int(model.predict(row.reshape(1, -1))[0])
+        sign = 1 if predicted == 1 else -1
+        attribution = sign * model.coef_[0] * row
+        good = faithfulness_correlation(
+            model, row, attribution, predicted, np.zeros(6), 3, 60, np.random.default_rng(0)
+        )
+        bad = faithfulness_correlation(
+            model, row, -attribution, predicted, np.zeros(6), 3, 60, np.random.default_rng(0)
+        )
+        self.assertGreater(good, 0.5)
+        self.assertLess(bad, 0.0)
+
+    def test_explanation_flows_shared_across_seeds_and_explainers(self):
+        from sklearn.ensemble import RandomForestClassifier
+
+        rng = np.random.default_rng(3)
+        x = rng.normal(size=(400, 5))
+        y = (x[:, 0] > 0).astype(int)
+        names = [f"f{i}" for i in range(5)]
+        pre = TabularPreprocessor(names).fit(pd.DataFrame(x, columns=names))
+        indices = np.arange(300, 320)
+        config = {"lime_samples": 50, "fidelity_k": [1, 3], "self_stability_samples": 2,
+                  "lime_repeat_seeds": 2, "faithfulness_subsets": 10}
+        seen = {}
+        fidelity_all, stability_all, latency_all = [], [], []
+        for model_seed in (42, 52):
+            model = RandomForestClassifier(n_estimators=10, random_state=model_seed).fit(x[:300], y[:300])
+            for name in ("TreeSHAP", "LIME"):
+                _, fidelity, stability, latency, _ = evaluate_explainer(
+                    "D", "binary", "random_forest", name, model, model_seed, indices,
+                    x[:300], x, y, pre, ["Attack", "Normal"], config, 42,
+                    np.arange(5), measure_self_stability=False,
+                )
+                seen[(model_seed, name)] = {r["source_test_index"] for r in fidelity}
+                self.assertEqual({r["model_seed"] for r in latency}, {model_seed})
+                fidelity_all += fidelity
+                stability_all += stability
+                latency_all += latency
+        self.assertEqual(len({frozenset(v) for v in seen.values()}), 1)
+        self.assertEqual(seen[(42, "TreeSHAP")], set(indices.tolist()))
+        summary = summarize_explanations(
+            pd.DataFrame(fidelity_all), pd.DataFrame(stability_all),
+            pd.DataFrame(latency_all), {}, seed=42,
+        )
+        self.assertEqual(len(summary), 2)
+        self.assertTrue((summary["n_explanations"] == 20).all())
+        self.assertTrue((summary["n_model_seeds"] == 2).all())
+        self.assertTrue(summary["faithfulness_correlation_mean"].between(-1, 1).all())
 
 
 class TransparencyContextTests(unittest.TestCase):

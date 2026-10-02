@@ -518,6 +518,38 @@ def fidelity_rows(
     ]
 
 
+def faithfulness_correlation(
+    model,
+    row: np.ndarray,
+    attribution: np.ndarray,
+    predicted_class: int,
+    baseline: np.ndarray,
+    subset_size: int,
+    n_subsets: int,
+    rng: np.random.Generator,
+) -> float:
+    """Bhatt et al. (2020): correlate attribution mass with the masking effect.
+
+    Random feature subsets are replaced by the baseline; a faithful explanation
+    assigns larger summed attribution to subsets whose removal lowers the
+    predicted-class probability more. Unlike top-k deletion, this tests the
+    whole attribution vector, not only its highest-ranked features.
+    """
+    size = min(subset_size, len(row))
+    subsets = [rng.choice(len(row), size=size, replace=False) for _ in range(n_subsets)]
+    variants = [row]
+    for subset in subsets:
+        masked = row.copy()
+        masked[subset] = baseline[subset]
+        variants.append(masked)
+    probabilities = model.predict_proba(np.vstack(variants))[:, predicted_class]
+    drops = probabilities[0] - probabilities[1:]
+    mass = np.asarray([attribution[subset].sum() for subset in subsets])
+    if np.std(drops) == 0 or np.std(mass) == 0:
+        return 0.0
+    return float(np.corrcoef(mass, drops)[0, 1])
+
+
 def safe_cosine(left: np.ndarray, right: np.ndarray) -> float:
     if np.linalg.norm(left) == 0 and np.linalg.norm(right) == 0:
         return 1.0
@@ -570,6 +602,8 @@ def evaluate_explainer(
     model_name: str,
     explainer_name: str,
     model,
+    model_seed: int,
+    indices: np.ndarray,
     x_train: np.ndarray,
     x_test: np.ndarray,
     y_test: np.ndarray,
@@ -577,21 +611,37 @@ def evaluate_explainer(
     classes: list[str],
     config: dict[str, Any],
     seed: int,
-    global_ranking: np.ndarray | None = None,
-) -> tuple[list[dict], list[dict], list[dict], dict[str, Any]]:
-    n = int(config["explanation_samples"])
-    full_prediction = model.predict(x_test).astype(int)
-    indices = explanation_indices(y_test, full_prediction, min(n, len(y_test)), seed)
+    global_ranking: np.ndarray | None,
+    measure_self_stability: bool,
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[float]]:
+    """Explain the given test flows with one explainer and score the explanations.
+
+    The flows are chosen by the caller so that every explainer and every model
+    seed is evaluated on exactly the same inputs, which the paired tests need.
+    Returns attribution, deletion-fidelity, neighbor-stability and per-flow
+    (latency, faithfulness) rows, plus LIME repeated-seed cosines.
+    """
     selected_x = x_test[indices]
     selected_y = y_test[indices]
     predicted = model.predict(selected_x).astype(int)
     n_features = selected_x.shape[1]
     k_values = list(config["fidelity_k"])
+    baseline = np.asarray(preprocessor.baseline_)
     rng = np.random.default_rng(seed)
+    # A separate stream keeps the random-control rankings independent of the
+    # faithfulness subsets.
+    faithfulness_rng = np.random.default_rng(seed + 1)
+    identity = {
+        "dataset": dataset,
+        "task": task,
+        "model": model_name,
+        "explainer": explainer_name,
+        "model_seed": int(model_seed),
+    }
     attribution_vectors = []
     attribution_rows: list[dict] = []
     fidelity: list[dict] = []
-    speed_ms = []
+    flow_rows: list[dict] = []
 
     if explainer_name == "TreeSHAP":
         explainer = shap.TreeExplainer(model)
@@ -630,14 +680,10 @@ def evaluate_explainer(
                 int(config["lime_samples"]),
             )
         elapsed = (time.perf_counter_ns() - start) / 1_000_000
-        speed_ms.append(elapsed)
         attribution_vectors.append(vector)
         confidence = float(model.predict_proba(row.reshape(1, -1))[0, prediction])
         common = {
-            "dataset": dataset,
-            "task": task,
-            "model": model_name,
-            "explainer": explainer_name,
+            **identity,
             "explanation_id": int(local_index),
             "source_test_index": int(source_index),
             "actual_class": classes[int(actual)],
@@ -650,35 +696,41 @@ def evaluate_explainer(
                 {**common, "feature": feature_name, "attribution": float(value)}
             )
         for item in fidelity_rows(
-            model,
-            row,
-            vector,
-            int(prediction),
-            np.asarray(preprocessor.baseline_),
-            k_values,
-            rng,
+            model, row, vector, int(prediction), baseline, k_values, rng,
             global_ranking=global_ranking,
         ):
             fidelity.append({**common, **item})
+        flow_rows.append(
+            {
+                **identity,
+                "source_test_index": int(source_index),
+                "latency_ms": elapsed,
+                "faithfulness_correlation": faithfulness_correlation(
+                    model,
+                    row,
+                    vector,
+                    int(prediction),
+                    baseline,
+                    int(config.get("faithfulness_subset_size", 5)),
+                    int(config.get("faithfulness_subsets", 50)),
+                    faithfulness_rng,
+                ),
+            }
+        )
 
-    attribution_array = np.asarray(attribution_vectors)
     stability = [
-        {
-            "dataset": dataset,
-            "task": task,
-            "model": model_name,
-            "explainer": explainer_name,
-            **row,
-        }
-        for row in nearest_neighbor_stability(selected_x, predicted, attribution_array)
+        {**identity, **item}
+        for item in nearest_neighbor_stability(
+            selected_x, predicted, np.asarray(attribution_vectors)
+        )
     ]
 
     self_stability_values: list[float] = []
-    if explainer_name == "LIME":
+    if explainer_name == "LIME" and measure_self_stability:
         repeat_n = min(int(config["self_stability_samples"]), len(selected_x))
+        repeat_count = int(config.get("lime_repeat_seeds", 3))
         for row, prediction in zip(selected_x[:repeat_n], predicted[:repeat_n]):
             variants = []
-            repeat_count = int(config.get("lime_repeat_seeds", 3))
             for repeat_seed in range(seed, seed + repeat_count):
                 local_explainer = make_lime_explainer(
                     x_train[stratified_indices(model.predict(x_train), min(5000, len(x_train)), repeat_seed)],
@@ -701,63 +753,69 @@ def evaluate_explainer(
                 for a in range(len(variants))
                 for b in range(a + 1, len(variants))
             )
+    return attribution_rows, fidelity, stability, flow_rows, self_stability_values
 
-    top_fidelity = pd.DataFrame(fidelity)
-    top_fidelity = top_fidelity[top_fidelity["control"] == "top"]
-    per_instance = top_fidelity.groupby("explanation_id")["probability_drop"].mean()
-    fidelity_mean, fidelity_low, fidelity_high = bootstrap_mean_ci(
-        per_instance.to_numpy(), seed
-    )
-    random_mean = float(
-        pd.DataFrame(fidelity)
-        .query("control == 'random'")
-        .groupby("explanation_id")["probability_drop"]
-        .mean()
-        .mean()
-    )
-    bottom_mean = float(
-        pd.DataFrame(fidelity)
-        .query("control == 'bottom'")
-        .groupby("explanation_id")["probability_drop"]
-        .mean()
-        .mean()
-    )
-    stability_frame = pd.DataFrame(stability)
-    stability_cosine = (
-        float(stability_frame["cosine_similarity"].mean())
-        if "cosine_similarity" in stability_frame
-        else np.nan
-    )
-    stability_jaccard = (
-        float(stability_frame["top5_jaccard"].mean())
-        if "top5_jaccard" in stability_frame
-        else np.nan
-    )
-    summary = {
-        "dataset": dataset,
-        "task": task,
-        "model": model_name,
-        "explainer": explainer_name,
-        "n_explanations": len(selected_x),
-        "fidelity_mean": fidelity_mean,
-        "fidelity_ci_low": fidelity_low,
-        "fidelity_ci_high": fidelity_high,
-        "random_fidelity_mean": random_mean,
-        "bottom_fidelity_mean": bottom_mean,
-        "fidelity_lift_vs_random": fidelity_mean - random_mean,
-        "flip_rate": float(top_fidelity["flipped"].mean()),
-        "stability_cosine_mean": stability_cosine,
-        "stability_jaccard_mean": stability_jaccard,
-        "self_stability_cosine_mean": float(np.mean(self_stability_values))
-        if self_stability_values
-        else np.nan,
-        "latency_median_ms": float(np.median(speed_ms)),
-        "latency_p90_ms": float(np.percentile(speed_ms, 90)),
-        "latency_p95_ms": float(np.percentile(speed_ms, 95)),
-        "latency_p99_ms": float(np.percentile(speed_ms, 99)),
-        "throughput_per_second": float(1000.0 / max(np.mean(speed_ms), 1e-12)),
-    }
-    return attribution_rows, fidelity, stability, summary
+
+def summarize_explanations(
+    fidelity: pd.DataFrame,
+    stability: pd.DataFrame,
+    flows: pd.DataFrame,
+    self_stability: dict[tuple[str, str, str, str], list[float]],
+    seed: int,
+) -> pd.DataFrame:
+    """One row per dataset/task/model/explainer, pooling all model seeds.
+
+    Fidelity is averaged per flow over k values and model seeds before the
+    bootstrap, so the interval reflects variation between flows.
+    """
+    keys = ["dataset", "task", "model", "explainer"]
+    stability_groups = dict(list(stability.groupby(keys))) if len(stability) else {}
+    flow_groups = dict(list(flows.groupby(keys)))
+    rows = []
+    for group_key, group in fidelity.groupby(keys):
+        per_flow = (
+            group.groupby(["source_test_index", "control"])["probability_drop"]
+            .mean()
+            .unstack("control")
+        )
+        mean, low, high = bootstrap_mean_ci(per_flow["top"].to_numpy(), seed)
+        random_mean = float(per_flow["random"].mean())
+        stab = stability_groups.get(group_key, pd.DataFrame())
+        flow = flow_groups[group_key]
+        latency = flow["latency_ms"].to_numpy()
+        faithfulness = flow.groupby("source_test_index")["faithfulness_correlation"].mean()
+        lime_self = self_stability.get(group_key, [])
+        rows.append(
+            {
+                **dict(zip(keys, group_key)),
+                "n_explanations": int(per_flow.shape[0]),
+                "n_model_seeds": int(group["model_seed"].nunique()),
+                "fidelity_mean": mean,
+                "fidelity_ci_low": low,
+                "fidelity_ci_high": high,
+                "random_fidelity_mean": random_mean,
+                "bottom_fidelity_mean": float(per_flow["bottom"].mean()),
+                "global_fidelity_mean": float(per_flow["global"].mean())
+                if "global" in per_flow
+                else np.nan,
+                "fidelity_lift_vs_random": mean - random_mean,
+                "flip_rate": float(group.loc[group.control.eq("top"), "flipped"].mean()),
+                "faithfulness_correlation_mean": float(faithfulness.mean()),
+                "stability_cosine_mean": float(stab["cosine_similarity"].mean())
+                if len(stab)
+                else np.nan,
+                "stability_jaccard_mean": float(stab["top5_jaccard"].mean())
+                if len(stab)
+                else np.nan,
+                "self_stability_cosine_mean": float(np.mean(lime_self)) if lime_self else np.nan,
+                "latency_median_ms": float(np.median(latency)),
+                "latency_p90_ms": float(np.percentile(latency, 90)),
+                "latency_p95_ms": float(np.percentile(latency, 95)),
+                "latency_p99_ms": float(np.percentile(latency, 99)),
+                "throughput_per_second": float(1000.0 / max(np.mean(latency), 1e-12)),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def holm_adjust(p_values: np.ndarray) -> np.ndarray:
@@ -771,44 +829,74 @@ def holm_adjust(p_values: np.ndarray) -> np.ndarray:
     return adjusted
 
 
-def paired_bootstrap_comparisons(fidelity: pd.DataFrame, seed: int) -> pd.DataFrame:
+def paired_bootstrap_comparisons(
+    fidelity: pd.DataFrame, seed: int, flows: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Paired TreeSHAP-minus-LIME comparisons on shared flows.
+
+    The prespecified deletion-fidelity hypothesis is one-sided (TreeSHAP
+    greater). Faithfulness correlation was added later, so it is tested
+    two-sided. Holm correction is applied within each metric family.
+    """
+    per_flow_values = [
+        (
+            "deletion",
+            "greater",
+            fidelity[fidelity["control"] == "top"]
+            .groupby(["dataset", "task", "model", "explainer", "source_test_index"])[
+                "probability_drop"
+            ]
+            .mean(),
+        )
+    ]
+    if flows is not None and "faithfulness_correlation" in flows:
+        per_flow_values.append(
+            (
+                "faithfulness_correlation",
+                "two-sided",
+                flows.groupby(["dataset", "task", "model", "explainer", "source_test_index"])[
+                    "faithfulness_correlation"
+                ].mean(),
+            )
+        )
     rows = []
-    top = fidelity[fidelity["control"] == "top"]
     keys = ["dataset", "task", "model"]
-    for group_key, group in top.groupby(keys):
-        per = (
-            group.groupby(["explainer", "source_test_index"])["probability_drop"]
-            .mean()
-            .unstack("explainer")
-            .dropna()
-        )
-        if not {"TreeSHAP", "LIME"}.issubset(per.columns) or per.empty:
-            continue
-        differences = (per["TreeSHAP"] - per["LIME"]).to_numpy()
-        mean, low, high = bootstrap_mean_ci(differences, seed)
-        if np.allclose(differences, 0):
-            p_value = 1.0
-        else:
-            p_value = float(
-                wilcoxon(differences, alternative="greater", zero_method="wilcox").pvalue
+    for metric, alternative, values in per_flow_values:
+        for group_key, group in values.groupby(level=keys):
+            per = group.droplevel(keys).unstack("explainer").dropna()
+            if not {"TreeSHAP", "LIME"}.issubset(per.columns) or per.empty:
+                continue
+            differences = (per["TreeSHAP"] - per["LIME"]).to_numpy()
+            mean, low, high = bootstrap_mean_ci(differences, seed)
+            if np.allclose(differences, 0):
+                p_value = 1.0
+            else:
+                p_value = float(
+                    wilcoxon(differences, alternative=alternative, zero_method="wilcox").pvalue
+                )
+            rows.append(
+                dict(
+                    zip(keys, group_key),
+                    metric=metric,
+                    alternative=alternative,
+                    n_pairs=len(differences),
+                    mean_difference_shap_minus_lime=mean,
+                    median_difference_shap_minus_lime=float(np.median(differences)),
+                    paired_effect_dz=float(mean / np.std(differences, ddof=1))
+                    if len(differences) > 1 and np.std(differences, ddof=1) > 0
+                    else np.nan,
+                    ci_low=low,
+                    ci_high=high,
+                    wilcoxon_p=p_value,
+                )
             )
-        rows.append(
-            dict(
-                zip(keys, group_key),
-                n_pairs=len(differences),
-                mean_difference_shap_minus_lime=mean,
-                median_difference_shap_minus_lime=float(np.median(differences)),
-                paired_effect_dz=float(mean / np.std(differences, ddof=1))
-                if len(differences) > 1 and np.std(differences, ddof=1) > 0
-                else np.nan,
-                ci_low=low,
-                ci_high=high,
-                wilcoxon_one_sided_p=p_value,
-            )
-        )
     result = pd.DataFrame(rows)
     if not result.empty:
-        result["holm_adjusted_p"] = holm_adjust(result["wilcoxon_one_sided_p"].to_numpy())
+        result["holm_adjusted_p"] = np.nan
+        for _, family in result.groupby("metric"):
+            result.loc[family.index, "holm_adjusted_p"] = holm_adjust(
+                family["wilcoxon_p"].to_numpy()
+            )
     return result
 
 
@@ -969,7 +1057,7 @@ def make_summary_plots(output_dir: Path) -> None:
     predictive = pd.read_csv(output_dir / "predictive_metrics.csv")
     xai = pd.read_csv(output_dir / "explanation_summary.csv")
     ablation = pd.read_csv(output_dir / "feature_ablation.csv")
-    attributions = pd.read_csv(output_dir / "attributions.csv")
+    attributions = pd.read_csv(output_dir / "attributions.csv.gz")
 
     pred_summary = (
         predictive.groupby(["dataset", "task", "model"], as_index=False)
@@ -1132,7 +1220,8 @@ def run(config_path: Path) -> None:
     attribution_rows: list[dict] = []
     fidelity_records: list[dict] = []
     stability_records: list[dict] = []
-    explanation_summaries: list[dict] = []
+    flow_records: list[dict] = []
+    self_stability: dict[tuple[str, str, str, str], list[float]] = {}
     ablation_rows: list[dict] = []
     dataset_metadata: dict[str, Any] = {}
     tuning_rows: list[dict] = []
@@ -1153,6 +1242,7 @@ def run(config_path: Path) -> None:
             for model_name in ("random_forest", "xgboost"):
                 frozen_model = None
                 frozen_prediction = None
+                seed_models: dict[int, Any] = {}
                 # Hyperparameters are chosen on a validation split carved from
                 # training data; the final models still fit the full training set.
                 fit_idx, val_idx = split_validation(
@@ -1218,6 +1308,7 @@ def run(config_path: Path) -> None:
                         }
                     )
                     per_class_rows.extend({**common, **row} for row in per_class)
+                    seed_models[int(model_seed)] = model
                     if int(model_seed) == seed:
                         frozen_model = model
                         frozen_prediction = prediction
@@ -1250,31 +1341,50 @@ def run(config_path: Path) -> None:
                 safe_name = f"{dataset}_{task}_{model_name}".replace("-", "_")
                 joblib.dump(artifact, output_dir / "models" / f"{safe_name}.joblib", compress=3)
 
-                global_ranking = np.argsort(-np.asarray(frozen_model.feature_importances_))
-                for explainer_name in ("TreeSHAP", "LIME"):
-                    print(
-                        f"[explain] {dataset} / {task} / {model_name} / {explainer_name}",
-                        flush=True,
-                    )
-                    attrs, fidelity, stability, summary = evaluate_explainer(
-                        dataset,
-                        task,
-                        model_name,
-                        explainer_name,
-                        frozen_model,
-                        x_train,
-                        x_test,
-                        y_test,
-                        preprocessor,
-                        classes,
-                        config["evaluation"],
-                        seed,
-                        global_ranking,
-                    )
-                    attribution_rows.extend(attrs)
-                    fidelity_records.extend(fidelity)
-                    stability_records.extend(stability)
-                    explanation_summaries.append(summary)
+                # The explained flows are chosen once, from the seed-42 model, and
+                # reused for every explainer and model seed so all comparisons pair.
+                indices = explanation_indices(
+                    y_test,
+                    frozen_prediction,
+                    min(int(config["evaluation"]["explanation_samples"]), len(y_test)),
+                    seed,
+                )
+                for model_seed in config["evaluation"].get("explanation_seeds", [seed]):
+                    model = seed_models[int(model_seed)]
+                    global_ranking = np.argsort(-np.asarray(model.feature_importances_))
+                    for explainer_name in ("TreeSHAP", "LIME"):
+                        print(
+                            f"[explain] {dataset} / {task} / {model_name} / "
+                            f"seed={model_seed} / {explainer_name}",
+                            flush=True,
+                        )
+                        attrs, fidelity, stability, flows, self_values = evaluate_explainer(
+                            dataset,
+                            task,
+                            model_name,
+                            explainer_name,
+                            model,
+                            int(model_seed),
+                            indices,
+                            x_train,
+                            x_test,
+                            y_test,
+                            preprocessor,
+                            classes,
+                            config["evaluation"],
+                            seed,
+                            global_ranking,
+                            measure_self_stability=int(model_seed) == seed,
+                        )
+                        # Raw attributions are kept for the frozen model only to
+                        # bound the artifact size.
+                        if int(model_seed) == seed:
+                            attribution_rows.extend(attrs)
+                        fidelity_records.extend(fidelity)
+                        stability_records.extend(stability)
+                        flow_records.extend(flows)
+                        if self_values:
+                            self_stability[(dataset, task, model_name, explainer_name)] = self_values
 
                 ablation_rows.extend(
                     feature_ablation(
@@ -1296,16 +1406,20 @@ def run(config_path: Path) -> None:
     pd.DataFrame(predictive_rows).to_csv(output_dir / "predictive_metrics.csv", index=False)
     pd.DataFrame(per_class_rows).to_csv(output_dir / "per_class_metrics.csv", index=False)
     pd.DataFrame(confusion_rows).to_csv(output_dir / "confusion_matrices.csv", index=False)
-    pd.DataFrame(attribution_rows).to_csv(output_dir / "attributions.csv", index=False)
+    # Large per-instance tables are compressed; pandas reads .csv.gz directly.
+    pd.DataFrame(attribution_rows).to_csv(output_dir / "attributions.csv.gz", index=False)
     fidelity_frame = pd.DataFrame(fidelity_records)
-    fidelity_frame.to_csv(output_dir / "fidelity.csv", index=False)
-    pd.DataFrame(stability_records).to_csv(output_dir / "stability.csv", index=False)
-    pd.DataFrame(explanation_summaries).to_csv(
-        output_dir / "explanation_summary.csv", index=False
-    )
+    fidelity_frame.to_csv(output_dir / "fidelity.csv.gz", index=False)
+    stability_frame = pd.DataFrame(stability_records)
+    stability_frame.to_csv(output_dir / "stability.csv", index=False)
+    flow_frame = pd.DataFrame(flow_records)
+    flow_frame.to_csv(output_dir / "explanation_flows.csv.gz", index=False)
+    summarize_explanations(
+        fidelity_frame, stability_frame, flow_frame, self_stability, seed
+    ).to_csv(output_dir / "explanation_summary.csv", index=False)
     pd.DataFrame(ablation_rows).to_csv(output_dir / "feature_ablation.csv", index=False)
     pd.DataFrame(tuning_rows).to_csv(output_dir / "tuning.csv", index=False)
-    paired_bootstrap_comparisons(fidelity_frame, seed).to_csv(
+    paired_bootstrap_comparisons(fidelity_frame, seed, flow_frame).to_csv(
         output_dir / "paired_comparisons.csv", index=False
     )
     fidelity_control_tests(fidelity_frame, seed).to_csv(

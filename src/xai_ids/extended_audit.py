@@ -225,17 +225,19 @@ def _lime_budget_rows(
 
 
 def _summarize_existing_outputs(output_dir: Path, extended_dir: Path) -> None:
-    fidelity = pd.read_csv(output_dir / "fidelity.csv")
+    fidelity = pd.read_csv(output_dir / "fidelity.csv.gz")
     top = fidelity[fidelity["control"] == "top"].copy()
+    # One instance is a flow explained under one model seed; its predicted
+    # class (and therefore error type) can differ between seeds.
     per_instance = (
         top.groupby(
-            ["dataset", "task", "model", "explainer", "explanation_id", "actual_class", "predicted_class", "correct"],
+            ["dataset", "task", "model", "explainer", "model_seed", "source_test_index", "actual_class", "predicted_class", "correct"],
             as_index=False,
         )["probability_drop"].mean()
     )
     class_summary = (
         per_instance.groupby(["dataset", "task", "model", "explainer", "actual_class"], as_index=False)
-        .agg(n=("explanation_id", "size"), mean_fidelity=("probability_drop", "mean"), median_fidelity=("probability_drop", "median"))
+        .agg(n=("source_test_index", "size"), mean_fidelity=("probability_drop", "mean"), median_fidelity=("probability_drop", "median"))
     )
     class_summary.to_csv(extended_dir / "class_specific_fidelity.csv", index=False)
 
@@ -249,7 +251,7 @@ def _summarize_existing_outputs(output_dir: Path, extended_dir: Path) -> None:
     per_instance["error_type"] = per_instance.apply(error_type, axis=1)
     error_summary = (
         per_instance.groupby(["dataset", "task", "model", "explainer", "error_type"], as_index=False)
-        .agg(n=("explanation_id", "size"), mean_fidelity=("probability_drop", "mean"), median_fidelity=("probability_drop", "median"))
+        .agg(n=("source_test_index", "size"), mean_fidelity=("probability_drop", "mean"), median_fidelity=("probability_drop", "median"))
     )
     error_summary.to_csv(extended_dir / "error_type_fidelity.csv", index=False)
 

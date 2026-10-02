@@ -41,7 +41,10 @@ tuning:
     max_depth: [7, 10]
     learning_rate: [0.08, 0.15]
 evaluation:
-  explanation_samples: 40
+  explanation_samples: 200
+  explanation_seeds: [42, 52, 62, 72, 82]
+  faithfulness_subset_size: 5
+  faithfulness_subsets: 50
   lime_samples: 350
   self_stability_samples: 6
   lime_repeat_seeds: 5
