@@ -1,5 +1,5 @@
 # Raw datasets are not redistributed (see README "Dataset preparation")
-data/
+/data
 # Serialized models are regenerated locally
 outputs/models/
 .venv/

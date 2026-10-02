@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import yaml
@@ -44,25 +45,33 @@ def paper_metadata() -> dict[str, str]:
     return {key: str(value) for key, value in metadata.items()}
 
 
+SERIF = "PaperSerif"
+SERIF_BOLD = "PaperSerif-Bold"
+SERIF_ITALIC = "PaperSerif-Italic"
+
+
 def register_fonts() -> None:
-    candidates = {
-        "LiberationSerif": ROOT
-        / ".venv/Lib/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif.ttf",
-        "LiberationSerif-Bold": ROOT
-        / ".venv/Lib/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Bold.ttf",
-        "LiberationSerif-Italic": ROOT
-        / ".venv/Lib/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Italic.ttf",
+    # IEEE Xplore rejects PDFs with non-embedded fonts, so every font used on the
+    # page (including table cells and footers) must be a registered TrueType font.
+    # The DejaVu fonts ship with matplotlib, which avoids OS-specific font paths.
+    font_dir = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+    fonts = {
+        SERIF: "DejaVuSerif.ttf",
+        SERIF_BOLD: "DejaVuSerif-Bold.ttf",
+        SERIF_ITALIC: "DejaVuSerif-Italic.ttf",
     }
-    for name, path in candidates.items():
-        if path.exists():
-            pdfmetrics.registerFont(TTFont(name, str(path)))
+    for name, filename in fonts.items():
+        if name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(name, str(font_dir / filename)))
+    # Needed for <b> and <i> markup inside paragraphs to select these faces.
+    pdfmetrics.registerFontFamily(
+        SERIF, normal=SERIF, bold=SERIF_BOLD, italic=SERIF_ITALIC, boldItalic=SERIF_BOLD
+    )
 
 
 def styles():
     register_fonts()
-    serif = "LiberationSerif" if "LiberationSerif" in pdfmetrics.getRegisteredFontNames() else "Times-Roman"
-    bold = "LiberationSerif-Bold" if "LiberationSerif-Bold" in pdfmetrics.getRegisteredFontNames() else "Times-Bold"
-    italic = "LiberationSerif-Italic" if "LiberationSerif-Italic" in pdfmetrics.getRegisteredFontNames() else "Times-Italic"
+    serif, bold, italic = SERIF, SERIF_BOLD, SERIF_ITALIC
     base = getSampleStyleSheet()
     return {
         "title": ParagraphStyle(
@@ -79,13 +88,13 @@ def styles():
             "Author", fontName=serif, fontSize=10, leading=11, alignment=TA_CENTER, spaceAfter=6
         ),
         "abstract": ParagraphStyle(
-            "Abstract", fontName=serif, fontSize=8.2, leading=9.4, alignment=TA_JUSTIFY, spaceAfter=4
+            "Abstract", fontName=serif, fontSize=8.4, leading=9.6, alignment=TA_JUSTIFY, spaceAfter=4
         ),
         "body": ParagraphStyle(
             "Body",
             fontName=serif,
-            fontSize=8.8,
-            leading=10.0,
+            fontSize=9.0,
+            leading=10.2,
             alignment=TA_JUSTIFY,
             spaceAfter=3.8,
             allowWidows=0,
@@ -112,13 +121,13 @@ def styles():
             keepWithNext=True,
         ),
         "caption": ParagraphStyle(
-            "Caption", fontName=serif, fontSize=7.5, leading=8.4, alignment=TA_JUSTIFY, spaceBefore=2, spaceAfter=5
+            "Caption", fontName=serif, fontSize=7.7, leading=8.6, alignment=TA_JUSTIFY, spaceBefore=2, spaceAfter=5
         ),
         "table_caption": ParagraphStyle(
-            "TableCaption", fontName=serif, fontSize=7.1, leading=8, alignment=TA_CENTER, spaceBefore=4, spaceAfter=2
+            "TableCaption", fontName=serif, fontSize=7.3, leading=8.2, alignment=TA_CENTER, spaceBefore=4, spaceAfter=2
         ),
         "reference": ParagraphStyle(
-            "Reference", fontName=serif, fontSize=6.8, leading=7.35, alignment=TA_LEFT, leftIndent=10, firstLineIndent=-10, spaceAfter=1.0
+            "Reference", fontName=serif, fontSize=7.0, leading=7.55, alignment=TA_LEFT, leftIndent=10, firstLineIndent=-10, spaceAfter=1.0
         ),
         "equation": ParagraphStyle(
             "Equation", fontName=italic, fontSize=8.2, leading=10, alignment=TA_CENTER, spaceBefore=2, spaceAfter=4
@@ -129,7 +138,7 @@ def styles():
 def header_footer(canvas, document):
     metadata = paper_metadata()
     canvas.saveState()
-    canvas.setFont("Times-Roman", 6.5)
+    canvas.setFont(SERIF, 6.5)
     canvas.drawString(0.55 * inch, 0.32 * inch, metadata["footer"])
     canvas.drawRightString(7.95 * inch, 0.32 * inch, str(document.page))
     canvas.restoreState()
@@ -139,12 +148,13 @@ def first_page(canvas, document):
     canvas.saveState()
     canvas.setLineWidth(0.4)
     canvas.line(0.55 * inch, 0.43 * inch, 7.95 * inch, 0.43 * inch)
-    canvas.setFont("Times-Roman", 6.5)
+    canvas.setFont(SERIF, 6.5)
     canvas.drawRightString(7.95 * inch, 0.27 * inch, str(document.page))
     canvas.restoreState()
 
 
 def make_document(path: Path):
+    register_fonts()
     metadata = paper_metadata()
     page_w, page_h = letter
     margin = 0.55 * inch
@@ -180,6 +190,9 @@ def make_document(path: Path):
         title=metadata["title"],
         author=metadata["authors"],
         subject="Explainable AI, intrusion detection, SHAP, LIME, fidelity, stability, latency",
+        keywords="explainable artificial intelligence, network intrusion detection, SHAP, LIME, explanation fidelity",
+        # The canvas otherwise starts every page in non-embedded Helvetica.
+        initialFontName=SERIF,
     )
     document.addPageTemplates(
         [
@@ -211,7 +224,7 @@ def make_table(data, widths, font_size=6.2, header=True, alignments=None):
                     str(value),
                     ParagraphStyle(
                         f"cell_{row_index}_{column_index}",
-                        fontName="Times-Bold" if header and row_index == 0 else "Times-Roman",
+                        fontName=SERIF_BOLD if header and row_index == 0 else SERIF,
                         fontSize=font_size,
                         leading=font_size + 1,
                         alignment=(alignments[column_index] if alignments else TA_CENTER),
@@ -222,6 +235,8 @@ def make_table(data, widths, font_size=6.2, header=True, alignments=None):
         )
     table = Table(converted, colWidths=widths, repeatRows=1 if header else 0, hAlign="CENTER")
     commands = [
+        # Tables otherwise select non-embedded Helvetica for every cell.
+        ("FONTNAME", (0, 0), (-1, -1), SERIF),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 2.1),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2.1),
@@ -265,7 +280,7 @@ def predictive_table(frame: pd.DataFrame, dataset: str, col_w: float, s):
                 "RF" if row.model == "random_forest" else "XGB",
                 f"{row.accuracy:.3f}",
                 f"{row.balanced:.3f}",
-                f"{row.macro:.3f} +/- {row.macro_sd:.3f}",
+                f"{row.macro:.4f} +/- {row.macro_sd:.4f}",
             ]
         )
     return KeepTogether(
@@ -277,7 +292,7 @@ def predictive_table(frame: pd.DataFrame, dataset: str, col_w: float, s):
             make_table(
                 rows,
                 [0.40 * inch, 0.36 * inch, 0.48 * inch, 0.58 * inch, col_w - 1.82 * inch],
-                font_size=5.9,
+                font_size=6.1,
             ),
         ]
     )
@@ -314,7 +329,7 @@ def xai_table(xai: pd.DataFrame, paired: pd.DataFrame, dataset: str, col_w: floa
             make_table(
                 rows,
                 [0.48 * inch, 0.29 * inch, 0.29 * inch, 1.08 * inch, 0.38 * inch, col_w - 2.52 * inch],
-                font_size=4.95,
+                font_size=5.35,
             ),
         ]
     )
@@ -336,7 +351,7 @@ def dataset_protocol_table(col_w: float, s, manifest: dict):
             make_table(
                 rows,
                 [0.72 * inch, 1.18 * inch, 0.82 * inch, 0.35 * inch, col_w - 3.07 * inch],
-                font_size=5.2,
+                font_size=5.6,
             ),
         ]
     )
@@ -356,7 +371,7 @@ def experiment_settings_table(col_w: float, s, evaluation: dict):
             make_table(
                 rows,
                 [0.72 * inch, col_w - 0.72 * inch],
-                font_size=5.5,
+                font_size=5.8,
                 alignments=[TA_LEFT, TA_LEFT],
             ),
         ]
@@ -383,9 +398,9 @@ def ablation_table(ablation: pd.DataFrame, col_w: float, s):
                 rows.append(
                     [
                         label,
-                        f"{int(full.feature_count)}/{full.macro_f1:.3f}",
-                        f"{int(reduced.feature_count)}/{reduced.macro_f1:.3f}",
-                        f"{reduced.macro_f1 - full.macro_f1:+.3f}",
+                        f"{int(full.feature_count)}/{full.macro_f1:.4f}",
+                        f"{int(reduced.feature_count)}/{reduced.macro_f1:.4f}",
+                        f"{reduced.macro_f1 - full.macro_f1:+.4f}",
                     ]
                 )
     return KeepTogether(
@@ -394,7 +409,7 @@ def ablation_table(ablation: pd.DataFrame, col_w: float, s):
             make_table(
                 rows,
                 [0.78 * inch, 0.78 * inch, 1.15 * inch, col_w - 2.71 * inch],
-                font_size=5.35,
+                font_size=5.7,
             ),
         ]
     )
@@ -424,13 +439,13 @@ def robustness_table(
         ["Simple baseline", "Majority; depth-5 tree", f"Tree macro-F1 {baseline_range.min():.3f}-{baseline_range.max():.3f}"],
         ["Class weighting", "Weighted; none", f"Weighted higher in {weighted_wins}/8 contexts"],
         ["Calibration", "10 binary bins", f"ECE {ece.min():.3f}-{ece.max():.3f}"],
-        ["Mask reference", "Median; zero; marginal; neighbors", f"Mean deletion {mask_mean.min():.3f}-{mask_mean.max():.3f}"],
+        ["Mask reference", "Median; zero; marginal; neighbors", f"Mean deletion [{mask_mean.min():.3f}, {mask_mean.max():.3f}]"],
         ["LIME budget", "100; 350; 700", f"Stability {lime.stability.iloc[0]:.3f}->{lime.stability.iloc[-1]:.3f}"],
     ]
     return KeepTogether(
         [
             Paragraph("TABLE VIII<br/>LITERATURE-DRIVEN ROBUSTNESS AUDITS", s["table_caption"]),
-            make_table(rows, [0.25 * col_w, 0.31 * col_w, 0.44 * col_w], font_size=5.35),
+            make_table(rows, [0.25 * col_w, 0.31 * col_w, 0.44 * col_w], font_size=5.7),
         ]
     )
 
@@ -531,22 +546,26 @@ def build_story(col_w: float):
             )
     minority_text = ", ".join(minority_parts)
 
+    affiliation_line = metadata["affiliation"]
+    if metadata["date"]:
+        affiliation_line += f" - {metadata['date']}"
+
     story = [
         Paragraph(
             metadata["title"],
             s["title"],
         ),
         Paragraph(
-            f"{metadata['authors']}<br/><font size='8'>{metadata['affiliation']} - {metadata['date']}</font>",
+            f"{metadata['authors']}<br/><font size='8'>{affiliation_line}</font>",
             s["author"],
         ),
         Paragraph(
-            f"<b>Abstract-</b> Machine-learning intrusion detection systems can be accurate while providing no defensible account of individual alerts. This work implements and evaluates an end-to-end benchmark that combines Random Forest (RF) and XGBoost classifiers with TreeSHAP and LIME explanations on CIC-IDS2017 and UNSW-NB15. Explanation quality is measured by controlled top-k deletion fidelity against random and bottom-ranked controls, nearest-neighbor stability, repeated-seed LIME self-stability, and wall-clock latency. Across {predictive_seed_count} model seeds, CIC binary macro-F1 reached "
+            f"<b>Abstract-</b> Machine-learning intrusion detection systems can be accurate while providing no defensible account of individual alerts. This work evaluates Random Forest and XGBoost classifiers with TreeSHAP and LIME explanations on CIC-IDS2017 and UNSW-NB15. Its distinguishing contribution is a matched, control-based protocol: on {explanation_count} common test flows per setting, explanation rankings are evaluated by top-k deletion against random and bottom-ranked controls, neighborhood stability, repeated-seed LIME stability, and explainer-call latency. Across {predictive_seed_count} model seeds, CIC binary macro-F1 reached "
             f"{cic_xgb_bin.macro_f1:.3f}; CIC multiclass macro-F1 was {cic_rf_multi.macro_f1:.3f}-{cic_xgb_multi.macro_f1:.3f}. On a leakage-controlled derivative of the predefined UNSW split, binary macro-F1 was {unsw_rf_bin.macro_f1:.3f}-{unsw_xgb_bin.macro_f1:.3f}, while multiclass macro-F1 was {unsw_xgb_multi.macro_f1:.3f}-{unsw_rf_multi.macro_f1:.3f}. TreeSHAP produced a larger mean confidence drop than LIME in all eight paired settings (Holm-adjusted one-sided p <= {pair_p_max:.2g}); paired differences ranged from {pair_min:.3f} to {pair_max:.3f}. TreeSHAP passed {tree_passes}/8 top-versus-random controls and LIME passed {lime_passes}/8. Alternative-reference and LIME-budget audits expose intervention and sampling sensitivity, while per-alert reports reject unsupported explanations. The framework therefore mitigates operational decision opacity without claiming causal or universal interpretability.",
             s["abstract"],
         ),
         Paragraph(
-            "<b>Index Terms-</b> Explainable artificial intelligence, intrusion detection, SHAP, LIME, fidelity, stability, Random Forest, XGBoost.",
+            "<b>Index Terms-</b> Explainable artificial intelligence, network intrusion detection, SHAP, LIME, explanation fidelity.",
             s["abstract"],
         ),
         NextPageTemplate("Later"),
@@ -557,7 +576,7 @@ def build_story(col_w: float):
             s["body"],
         ),
         para(
-            "SHAP and LIME are widely used post-hoc explainers. SHAP assigns additive feature attributions based on Shapley-value principles [6], whereas LIME fits a sparse surrogate around one prediction [7]. Prior IDS studies commonly present attribution plots or use attributions for feature selection [8]-[10]. Visual plausibility, however, does not establish that the highlighted features actually control the model output. This work therefore treats explanation quality as a measurable system property.",
+            "SHAP and LIME are widely used post-hoc explainers. SHAP assigns additive feature attributions based on Shapley-value principles [6], whereas LIME fits a sparse surrogate around one prediction [7]. Prior IDS studies commonly present attribution plots or use attributions for feature selection [8]-[10]. Visual plausibility, however, does not establish that highlighted features control model output; explanation research likewise warns that visually convincing attributions can fail basic sanity checks [12], [16]. This work therefore treats explanation quality as a measurable system property.",
             s["body"],
         ),
         para(
@@ -577,7 +596,7 @@ def build_story(col_w: float):
             s["body"],
         ),
         para(
-            "Mane and Rao demonstrated multiple explanation styles for a deep IDS but did not standardize quantitative validation [8]. Gaspar <i>et al.</i> tested whether LIME/SHAP perturbations could change IDS errors [9], while Ahmed <i>et al.</i> combined SHAP feature selection with CIC ensembles [10]. Alazab <i>et al.</i> used information gain to reduce NSL-KDD features [13], and Kasongo and Sun selected 19 UNSW features with XGBoost [14]; neither established a universal feature count. Yeh <i>et al.</i> argue that explanations require objective fidelity and sensitivity measures beyond plausibility [12]. This work joins these ideas through matched explainers, explicit controls, feature curves, robustness audits, latency distributions, and paired uncertainty.",
+            "Mane and Rao demonstrated multiple explanation styles for a deep IDS but did not standardize quantitative validation [8]. Gaspar <i>et al.</i> tested whether LIME/SHAP perturbations could change IDS errors [9], while Ahmed <i>et al.</i> combined SHAP feature selection with CIC ensembles [10]. Alazab <i>et al.</i> used information gain to reduce NSL-KDD features [13], and Kasongo and Sun selected 19 UNSW features with XGBoost [14]; neither established a universal feature count. The X-IDS survey by Neupane <i>et al.</i> calls for stakeholder-specific explanations and explicit evaluation metrics [15]. Yeh <i>et al.</i> and Adebayo <i>et al.</i> further motivate objective fidelity, sensitivity, and sanity checks beyond visual plausibility [12], [16]. The distinguishing contribution here is not another SHAP/LIME visualization, but matched explainers, negative controls, robustness audits, paired uncertainty, and a reject option for alert-level evidence.",
             s["body"],
         ),
         section("III", "Methodology", s["section"]),
@@ -606,7 +625,7 @@ def build_story(col_w: float):
         Spacer(1, 4),
         subsection("D", "Explanation Metrics", s["subsection"]),
         para(
-            f"For each configuration, {explanation_count} label-stratified test flows are explained by both methods, with available binary correct and error types explicitly represented. Attributions are converted to signed vectors in the original feature order. For an input <i>x</i>, predicted class <i>c</i>, feature ranking <i>r</i>, and training baseline <i>b</i>, the deletion score at <i>k</i> is",
+            f"For each configuration, the seed-42 model explains the same {explanation_count} fixed, label-stratified test flows with both methods; available binary true-positive, false-positive, true-negative, and false-negative cases are explicitly represented. Attributions are converted to signed vectors in the original feature order. For an input <i>x</i>, predicted class <i>c</i>, feature ranking <i>r</i>, and training baseline <i>b</i>, the deletion score at <i>k</i> is",
             s["body"],
         ),
         para(
@@ -627,7 +646,7 @@ def build_story(col_w: float):
         ),
         subsection("E", "Statistical Analysis and Decision Rules", s["subsection"]),
         para(
-            "Because TreeSHAP and LIME explain identical flows, the primary comparison uses within-flow differences in mean top-k deletion score. The mean difference and a percentile 95% confidence interval are obtained with 2,000 paired bootstrap resamples. The prespecified directional hypothesis (TreeSHAP fidelity greater than LIME) is tested with a one-sided Wilcoxon signed-rank test. Holm's step-down procedure controls family-wise error across the eight dataset-task-model comparisons. The same correction is applied to 16 top-versus-random control tests. Statistical significance requires adjusted p < 0.05; practical importance is reported as the raw probability-drop difference and paired effect d<sub>z</sub>.",
+            "Because TreeSHAP and LIME explain identical flows, the primary comparison uses within-flow differences in mean top-k deletion score. The mean difference and a percentile 95% confidence interval are obtained with 2,000 paired bootstrap resamples. The prespecified directional hypothesis (TreeSHAP fidelity greater than LIME) is tested with a one-sided Wilcoxon signed-rank test. Holm's step-down procedure controls family-wise error across the eight dataset-task-model comparisons. The same correction is applied to 16 top-versus-random control tests. Statistical significance requires adjusted p < 0.05; practical importance is reported as the raw probability-drop difference and paired d<sub>z</sub>, defined as the mean paired difference divided by its sample standard deviation. These quantities describe the fixed evaluation sample and intervention, not a population of future networks.",
             s["body"],
         ),
         figure(
@@ -758,7 +777,7 @@ def build_story(col_w: float):
         ),
         subsection("C", "Statistical Validity", s["subsection"]),
         para(
-            f"Explanation inference uses {explanation_count} matched flows per configuration. Paired analysis and multiplicity correction improve efficiency and false-positive control, but intervals describe the selected flows rather than repeated datasets. The neighbor metric searches only within those selected flows and uses standardized Euclidean distance on a mixed encoded feature space. Feature-count results are exploratory because the reported best k is identified on the test results. Rare classes have small support. The {predictive_seed_count} predictive seeds quantify algorithmic variation, not uncertainty caused by alternative captures, preprocessing pipelines, or hyperparameter searches.",
+            f"Explanation inference uses {explanation_count} matched flows per configuration. Paired analysis and multiplicity correction improve efficiency and false-positive control, but intervals describe the selected flows rather than repeated datasets. Flow-level resampling also treats selected flows as independent even though shared sessions or capture conditions may induce dependence, so intervals may be optimistic. The neighbor metric searches only within those selected flows and uses standardized Euclidean distance on a mixed encoded feature space. Feature-count results are exploratory because the reported best k is identified on the test results. Rare classes have small support. The {predictive_seed_count} predictive seeds quantify algorithmic variation, not uncertainty caused by alternative captures, preprocessing pipelines, or hyperparameter searches.",
             s["body"],
         ),
         subsection("D", "Scope", s["subsection"]),
@@ -766,14 +785,19 @@ def build_story(col_w: float):
             "Only tree classifiers and two post-hoc explainers are evaluated. The LIME budget audit covers 100-700 samples but not alternative kernels or discretizers. The calibration audit diagnoses raw probabilities but does not recalibrate them. SMOTE is omitted because interpolating encoded categorical flow fields can create invalid traffic; weighting versus no weighting is reported instead. Deep models, counterfactuals, calibrated thresholds, drift, adversarial manipulation, causal claims, and analyst studies remain outside scope.",
             s["body"],
         ),
+        subsection("E", "Ethics and Artifact Availability", s["subsection"]),
+        para(
+            "The study uses public benchmark flow records generated in controlled testbeds and performs no human-participant or animal research, live-network intervention, or attack deployment. Dataset redistribution remains subject to the providers' terms. To preserve double-blind review, the manuscript omits an identifying repository link; the camera-ready version should provide an archival code URL and DOI together with the exact commit. The released artifact excludes raw data and serialized models but includes acquisition guidance, source hashes, cleaning audits, configurations, tests, and regenerated results.",
+            s["body"],
+        ),
         section("VIII", "Reproducibility", s["section"]),
         para(
-            f"The run used Python {manifest['environment']['python']}, scikit-learn {manifest['environment']['scikit_learn']}, XGBoost {manifest['environment']['xgboost']}, and SHAP {manifest['environment']['shap']} on Windows 11 with {manifest['environment']['logical_cpu_count']} logical AMD64 CPUs. The release stores configuration, package pins, SHA-256 source hashes, row and deduplication audits, per-instance metrics, comparisons, plots, tests, and a machine-readable manifest. Raw data and serialized models are excluded from the public repository because of size and redistribution constraints; scripts regenerate them from locally supplied inputs.",
+            f"The run used Python {manifest['environment']['python']}, scikit-learn {manifest['environment']['scikit_learn']}, XGBoost {manifest['environment']['xgboost']}, and SHAP {manifest['environment']['shap']} on Windows 11 with {manifest['environment']['logical_cpu_count']} logical AMD64 CPUs. The artifact stores the fixed configuration, package pins, SHA-256 source hashes, row and deduplication audits, per-instance metrics, comparisons, plots, unit tests, cross-artifact checks, and a machine-readable manifest. Models use the declared fixed settings; no automated hyperparameter search is reported. Scripts regenerate excluded raw-data and serialized-model artifacts from locally supplied inputs.",
             s["body"],
         ),
         section("IX", "Conclusion", s["section"]),
         para(
-            f"This study addresses black-box IDS decisions within a defined operational scope by evaluating detection and explanation as one system and producing rejectable per-alert evidence. TreeSHAP exceeds LIME in all eight primary paired comparisons, clears {tree_passes}/8 random-ranking controls, and is more neighborhood-stable; LIME clears {lime_passes}/8. Baseline, balancing, calibration, masking-reference, sampling-budget, class/error, feature-count, and latency audits expose where conclusions do and do not generalize. The transparency report converts this evidence into auditable alerts, but reference sensitivity confirms that post-hoc attribution is not causal or universal interpretability. Future work should add realistic conditional interventions, probability recalibration, drift tests, more explainers, and an analyst study.",
+            f"This study addresses black-box IDS decisions within a defined operational scope by evaluating detection and explanation as one system and producing rejectable per-alert evidence. TreeSHAP exceeds LIME in all eight primary paired comparisons, clears {tree_passes}/8 random-ranking controls, and has higher measured neighborhood consistency within the selected subsets; LIME clears {lime_passes}/8. Baseline, balancing, calibration, masking-reference, sampling-budget, class/error, feature-count, and latency audits expose where conclusions do and do not generalize. The transparency report converts this evidence into auditable alerts, but reference sensitivity confirms that post-hoc attribution is not causal or universal interpretability. Future work should add realistic conditional interventions, probability recalibration, capture-aware resampling, drift tests, more explainers, and an analyst study.",
             s["body"],
         ),
         section("REFERENCES", "", s["section"]),
@@ -794,15 +818,21 @@ def build_story(col_w: float):
         "[12] C.-K. Yeh, C.-Y. Hsieh, A. Suggala, D. I. Inouye, and P. Ravikumar, \"On the (in)fidelity and sensitivity of explanations,\" in <i>Advances in Neural Information Processing Systems</i>, vol. 32, 2019.",
         "[13] A. Alazab, M. Hobbs, J. Abawajy, and M. Alazab, \"Using feature selection for intrusion detection system,\" in <i>Proc. Int. Symp. Communications and Information Technologies</i>, 2012, pp. 296-301, doi: 10.1109/ISCIT.2012.6380910.",
         "[14] S. M. Kasongo and Y. Sun, \"Performance analysis of intrusion detection systems using a feature selection method on the UNSW-NB15 dataset,\" <i>Journal of Big Data</i>, vol. 7, art. no. 105, 2020, doi: 10.1186/s40537-020-00379-6.",
+        "[15] S. Neupane <i>et al.</i>, \"Explainable intrusion detection systems (X-IDS): A survey of current methods, challenges, and opportunities,\" <i>IEEE Access</i>, vol. 10, pp. 112392-112415, 2022, doi: 10.1109/ACCESS.2022.3216617.",
+        "[16] J. Adebayo, J. Gilmer, M. Muelly, I. Goodfellow, M. Hardt, and B. Kim, \"Sanity checks for saliency maps,\" in <i>Advances in Neural Information Processing Systems</i>, vol. 31, 2018.",
     ]
     story.extend(Paragraph(reference, s["reference"]) for reference in references)
     return story
 
 
 def main() -> None:
+    from src.xai_ids.benchmark import make_summary_plots
     from src.xai_ids.paper_figures import build_all
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    # Summary plots read only the committed CSVs, so the paper can be rebuilt
+    # without re-running the full benchmark.
+    make_summary_plots(RESULTS)
     build_all(RESULTS)
     document, col_w = make_document(OUTPUT)
     document.build(build_story(col_w))
