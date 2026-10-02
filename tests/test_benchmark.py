@@ -9,6 +9,7 @@ from src.xai_ids.benchmark import (
     predictive_metrics,
     bootstrap_mean_ci,
     candidate_params,
+    choose_feature_count,
     nearest_neighbor_stability,
     safe_cosine,
     select_hyperparameters,
@@ -138,6 +139,12 @@ class BenchmarkUnitTests(unittest.TestCase):
         )
         self.assertEqual(len(rows), 3)
         self.assertEqual(sum(row["selected"] for row in rows), 1)
+
+
+    def test_feature_count_choice_uses_smallest_noninferior_k(self):
+        scores = {5: 0.90, 10: 0.948, 20: 0.951, 34: 0.952}
+        self.assertEqual(choose_feature_count(scores, 34), 10)
+        self.assertEqual(choose_feature_count({5: 0.5, 34: 0.9}, 34), 34)
 
 
 if __name__ == "__main__":

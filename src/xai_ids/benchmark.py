@@ -845,6 +845,14 @@ def fidelity_control_tests(fidelity: pd.DataFrame, seed: int) -> pd.DataFrame:
     return result
 
 
+def choose_feature_count(
+    validation_scores: dict[int, float], full_count: int, tolerance: float = 0.005
+) -> int:
+    """Smallest feature count whose validation macro-F1 is within tolerance of full."""
+    threshold = validation_scores[full_count] - tolerance
+    return min(k for k, score in validation_scores.items() if score >= threshold)
+
+
 def feature_ablation(
     dataset: str,
     task: str,
@@ -855,20 +863,35 @@ def feature_ablation(
     x_test: np.ndarray,
     y_test: np.ndarray,
     feature_names: list[str],
-    ranking: np.ndarray,
     k_values: list[int],
     seed: int,
+    validation_size: float,
 ) -> list[dict[str, Any]]:
+    """Feature-count curve with the count chosen on validation data only.
+
+    Features are ranked by a model fitted on the fit partition, each subset is
+    scored on the validation partition, and the smallest non-inferior count is
+    selected. Test scores are reported for every count but never used to choose.
+    """
+    n_classes = len(np.unique(y_train))
+
+    def fitted(x: np.ndarray, y: np.ndarray):
+        model = make_model(model_name, model_params, seed, n_classes)
+        weight = compute_sample_weight("balanced", y) if model_name == "xgboost" else None
+        return model.fit(x, y, sample_weight=weight)
+
+    fit_idx, val_idx = split_validation(y_train, validation_size, seed)
+    x_fit, y_fit = x_train[fit_idx], y_train[fit_idx]
+    x_val, y_val = x_train[val_idx], y_train[val_idx]
+    ranking = np.argsort(-np.asarray(fitted(x_fit, y_fit).feature_importances_))
+
     rows = []
     for k in [*k_values, len(feature_names)]:
         k_eff = min(k, len(feature_names))
         selected = ranking[:k_eff]
-        model = make_model(model_name, model_params, seed, len(np.unique(y_train)))
-        sample_weight = (
-            compute_sample_weight("balanced", y_train) if model_name == "xgboost" else None
-        )
+        validation_prediction = fitted(x_fit[:, selected], y_fit).predict(x_val[:, selected])
         start = time.perf_counter()
-        model.fit(x_train[:, selected], y_train, sample_weight=sample_weight)
+        model = fitted(x_train[:, selected], y_train)
         training_seconds = time.perf_counter() - start
         prediction = model.predict(x_test[:, selected])
         explainer = shap.TreeExplainer(model)
@@ -882,7 +905,10 @@ def feature_ablation(
                 "task": task,
                 "model": model_name,
                 "feature_count": int(k_eff),
-                "macro_f1": float(f1_score(y_test, prediction, average="macro", zero_division=0)),
+                "validation_macro_f1": float(
+                    f1_score(y_val, validation_prediction, average="macro", zero_division=0)
+                ),
+                "test_macro_f1": float(f1_score(y_test, prediction, average="macro", zero_division=0)),
                 "weighted_f1": float(
                     f1_score(y_test, prediction, average="weighted", zero_division=0)
                 ),
@@ -891,6 +917,11 @@ def feature_ablation(
                 "selected_features": " | ".join(feature_names[i] for i in selected),
             }
         )
+    chosen = choose_feature_count(
+        {row["feature_count"]: row["validation_macro_f1"] for row in rows}, len(feature_names)
+    )
+    for row in rows:
+        row["selected"] = int(row["feature_count"] == chosen)
     return rows
 
 
@@ -977,7 +1008,7 @@ def make_summary_plots(output_dir: Path) -> None:
         sns.lineplot(
             data=subset,
             x="feature_count",
-            y="macro_f1",
+            y="test_macro_f1",
             hue="model",
             style="task",
             markers=True,
@@ -1230,7 +1261,6 @@ def run(config_path: Path) -> None:
                     stability_records.extend(stability)
                     explanation_summaries.append(summary)
 
-                ranking = np.argsort(-np.asarray(frozen_model.feature_importances_))
                 ablation_rows.extend(
                     feature_ablation(
                         dataset,
@@ -1242,9 +1272,9 @@ def run(config_path: Path) -> None:
                         x_test,
                         y_test,
                         feature_names,
-                        ranking,
                         list(config["evaluation"]["feature_ablation_k"]),
                         seed,
+                        float(config["tuning"]["validation_size"]),
                     )
                 )
 
