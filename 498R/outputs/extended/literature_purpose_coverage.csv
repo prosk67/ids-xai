@@ -1,0 +1,15 @@
+literature_requirement,status,evidence
+Modern dual-dataset evaluation,complete,CIC-IDS2017 and official UNSW-NB15 split
+Binary and multiclass tasks,complete,Both tasks on both datasets
+Simple predictive baselines,complete,Majority and depth-5 decision tree
+Five predictive seeds,complete,"Seeds 42, 52, 62, 72, and 82"
+Leakage-safe preprocessing,complete,Training-only medians and category dictionaries
+Random and bottom fidelity controls,complete,Paired deletion controls with Holm correction
+Alternative masking baselines,complete,"Median/mode, zero, marginal row, and nearest same/opposite predictions"
+LIME sampling sensitivity,complete,"100, 350, and 700 samples with five repeats"
+Explanation by class and error type,complete,Class and TP/FP/TN/FN summaries
+Stability distributions,complete,"Q10, median, and Q90 for cosine and top-5 overlap"
+Probability calibration audit,complete,"Brier score, ECE, and reliability curves"
+Balancing sensitivity,partial,Class weighting versus none; SMOTE omitted to avoid synthetic categorical flows
+Human analyst usefulness,future work,Requires ethics-approved task-based user study
+Causal explanation,out of scope,Post-hoc model evidence cannot establish network causality

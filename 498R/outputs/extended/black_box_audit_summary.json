@@ -1,0 +1,7 @@
+{
+  "tree_shap_random_controls_passed": 8,
+  "tree_shap_random_controls_total": 8,
+  "paired_tree_shap_superiority_intervals_above_zero": 8,
+  "paired_comparisons_total": 8,
+  "claim": "Opaque tree-IDS decisions are converted into auditable and rejectable model evidence; causal and universal interpretability are not claimed."
+}
