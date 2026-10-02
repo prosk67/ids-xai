@@ -23,9 +23,9 @@ This document maps the implementation plan and success criteria in `Lit_Review_4
 | Simple predictive baselines | Complete | Majority and depth-5 tree in `outputs/extended/predictive_baselines.csv` |
 | Macro-F1 and class-aware metrics | Complete | `predictive_metrics.csv`, `per_class_metrics.csv`, confusion matrices, FPR/FNR, PR-AUC |
 | Calibration diagnosis | Complete | Brier score, ECE, ten-bin reliability data, and calibration plot in `outputs/extended/` |
-| Same instances for SHAP and LIME | Complete | 40 matched flows per configuration with identical source indices |
+| Same instances for SHAP and LIME | Complete | 200 matched flows per configuration, identical across explainers and all five model seeds |
 | Correct/error-case explanation coverage | Complete | Available binary TP/FP/TN/FN cases explicitly included; error summaries saved |
-| Top-k deletion fidelity | Complete | k={1,3,5,10}, per-instance values in `outputs/fidelity.csv` |
+| Top-k deletion fidelity | Complete | k={1,3,5,10}, per-instance values in `outputs/fidelity.csv.gz` |
 | Random and bottom controls | Complete | 16 corrected control tests in `fidelity_control_tests.csv` |
 | Alternative perturbation references | Complete | Median/mode, zero, marginal row, nearest same prediction, nearest opposite prediction |
 | Neighborhood stability | Complete | Cosine and top-five Jaccard values plus Q10/median/Q90 summaries |

@@ -6,4 +6,7 @@ outputs/models/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-498R_COLAB_BUNDLE.zip
+ids-xai.zip
+ids-xai-data.zip
+outputs_quick/
+config_quick.yaml

@@ -10,27 +10,30 @@ This project asks a practical question: when an intrusion-detection model raises
 
 The framework treats detection and explanation as one auditable system:
 
-1. train and evaluate the detector without fitting preprocessing on test data;
-2. explain the same 40 stratified test flows with TreeSHAP and LIME;
-3. mask top-ranked features and measure the predicted-class confidence drop;
-4. compare the drop against random and bottom-ranked feature controls;
-5. report paired uncertainty, stability, latency, calibration, and masking sensitivity; and
-6. generate alert reports that reject weak explanation evidence.
+1. train and evaluate the detector without fitting preprocessing on test data, choosing hyperparameters and feature counts on a training-only validation split;
+2. explain the same 200 stratified test flows with TreeSHAP and LIME under each of five model seeds;
+3. mask top-ranked features and measure the predicted-class confidence drop, and correlate attribution mass with the masking effect on random feature subsets (faithfulness correlation);
+4. compare the drop against random, bottom-ranked, and global-importance feature controls;
+5. check that explanations change when the model is trained on permuted labels (data-randomization sanity check);
+6. report paired uncertainty, stability, latency, calibration, masking and SHAP-background sensitivity, and the label-conflict ceiling of each dataset; and
+7. generate alert reports that reject weak explanation evidence.
 
 This mitigates the operational black-box problem by making individual decisions inspectable and testable. It does **not** claim causal explanations, universal interpretability, or safe autonomous response.
 
-## Corrected headline results
+## Headline results
 
 Mean macro-F1 over five model seeds:
 
 | Dataset | Task | Random Forest | XGBoost |
 |---|---|---:|---:|
-| CIC-IDS2017 | Binary | 0.9965 | 0.9974 |
-| CIC-IDS2017 | Multiclass | 0.9254 | 0.9324 |
-| UNSW-NB15, leakage controlled | Binary | 0.8013 | 0.8156 |
-| UNSW-NB15, leakage controlled | Multiclass | 0.5140 | 0.5083 |
+| CIC-IDS2017 | Binary | 0.9975 | 0.9977 |
+| CIC-IDS2017 | Multiclass | 0.9299 | 0.9334 |
+| UNSW-NB15, leakage controlled | Binary | 0.8148 | 0.8201 |
+| UNSW-NB15, leakage controlled | Multiclass | 0.5323 | 0.5292 |
 
-TreeSHAP achieved higher paired top-5 deletion fidelity than LIME in all 8 dataset/task/model configurations. All paired 95% bootstrap intervals were above zero; Holm-adjusted one-sided Wilcoxon p-values were at most 0.00319. TreeSHAP passed the top-versus-random control in 8/8 configurations, while LIME passed 7/8.
+Hyperparameters and feature counts are chosen on a training-only validation split; the test partition is never used for selection.
+
+TreeSHAP and LIME explain the same 200 test flows per configuration under all five model seeds. TreeSHAP had higher paired deletion fidelity (mean of k = 1, 3, 5, 10) than LIME in all 8 dataset/task/model configurations (differences 0.087-0.187; Holm-adjusted one-sided Wilcoxon p <= 8.8e-17) and higher faithfulness correlation in all 8 (differences 0.248-0.351). TreeSHAP beat random rankings in 8/8 configurations and the model's own global-importance ranking in 8/8. LIME beat random rankings in 7/8 (failing for CIC-IDS2017 binary XGBoost) but the global ranking in only 3/8, so in most settings LIME's per-alert ranking adds little beyond a fixed importance list.
 
 The accessible UNSW mirror required a publication-critical leakage correction. The loader removes 78,519 duplicate training rows, 32,361 duplicate testing rows, and 2,255 test feature vectors also present in training. The resulting predefined partition has 96,822 training and 47,716 testing rows with zero exact feature-vector overlap. These lower corrected scores supersede earlier contaminated results.
 
@@ -38,7 +41,8 @@ The accessible UNSW mirror required a publication-critical leakage correction. T
 
 - [IEEE-style research manuscript](output/pdf/xai_ids_ieee_paper.pdf)
 - [Publication-readiness audit](PUBLICATION_READINESS_REPORT.md)
-- [Beginner-to-end project handbook](PROJECT_HANDBOOK.md)
+- [How the project was done (full details, beginner to end)](HOW_THE_PROJECT_WAS_DONE.md)
+- [Run everything on Google Colab](COLAB_RUN.ipynb)
 - [Executable research walkthrough](PROJECT_WALKTHROUGH.ipynb)
 - [Literature-to-evidence traceability](LITERATURE_REQUIREMENTS_TRACEABILITY.md)
 - [Example conservative alert report](outputs/alert_reports/unsw_binary_xgb_example.md)
@@ -56,6 +60,8 @@ run_extended_audit.py        robustness and literature-driven audits
 explain_alert.py             per-alert transparency report
 verify_outputs.py            cross-artifact integrity checks
 PROJECT_WALKTHROUGH.ipynb    guided exploration of all research tasks
+COLAB_RUN.ipynb              full run on Google Colab
+HOW_THE_PROJECT_WAS_DONE.md  complete explanation of the project
 ```
 
 ## Reproduce
@@ -74,7 +80,9 @@ python -B verify_outputs.py
 python -B -m unittest discover -s tests -v
 ```
 
-The complete benchmark is computationally heavier than the notebook. The notebook reads the committed result tables and is the easiest way to understand the workflow. In Google Colab, upload the locally generated `498R_COLAB_BUNDLE.zip` when prompted.
+On a 16-core machine the benchmark takes about 28 minutes and the extended audit about 15. `PROJECT_WALKTHROUGH.ipynb` reads the committed result tables and is the easiest way to understand the workflow without rerunning anything.
+
+**Google Colab:** pack the code with `git archive -o ids-xai.zip HEAD` and the data with `zip -r ids-xai-data.zip data/raw`, upload both to `MyDrive/ids-xai/`, and run [`COLAB_RUN.ipynb`](COLAB_RUN.ipynb). It installs the pinned packages, checks the data hashes, and runs the tests, benchmark, audit, paper build, and verifier, then saves the results to Drive. Set `QUICK = True` for a short smoke run. Details are in [HOW_THE_PROJECT_WAS_DONE.md](HOW_THE_PROJECT_WAS_DONE.md#18-running-the-project-on-google-colab).
 
 ## Dataset preparation
 
@@ -106,7 +114,7 @@ Serialized models are generated locally and intentionally excluded from GitHub.
 - Neither benchmark is a live security-operations deployment or a cross-organization test.
 - CIC evaluation is stratified, not temporal.
 - UNSW is a predefined testbed partition, not a documented temporal holdout.
-- Neighborhood stability is measured within the selected 40-flow audit subset.
+- Neighborhood stability is measured within the selected 200-flow explanation subset.
 - Deletion fidelity depends on the masking distribution and should not be interpreted causally.
 - UNSW multiclass recall remains weak for several minority attacks.
 - The project does not include a human analyst study or production drift evaluation.

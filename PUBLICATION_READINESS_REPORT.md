@@ -1,7 +1,7 @@
 # Publication Readiness Report
 
 **Project:** Explainable Machine-Learning Intrusion Detection on CIC-IDS2017 and UNSW-NB15
-**Audit date:** 22 August 2026
+**Audit date:** 22 August 2026; protocol rework 2 October 2026
 **Status:** Technically ready for peer-review preparation; author, venue, and archival-repository details remain to be supplied before submission.
 
 ## Executive verdict
@@ -10,7 +10,19 @@ The project now answers its research question with a reproducible, leakage-audit
 
 The strongest publication-critical defect found during this audit was data leakage in the accessible UNSW-NB15 parquet mirror. The original files contained 78,519 exact duplicate training rows, 32,361 exact duplicate testing rows, and 2,255 test feature vectors also present in training after within-partition deduplication. The pipeline now removes all three forms of duplication before fitting or evaluation. The cleaned predefined partition contains 96,822 training rows and 47,716 testing rows, with zero exact feature-vector overlap. All UNSW metrics, explanations, figures, audits, and paper claims were regenerated from this cleaned partition.
 
-## What was corrected
+## October 2026 rework
+
+A second audit (2 October 2026) found that the 22 August paper could not be regenerated from the code on disk, that the verifier asserted research outcomes (8/8 and 7/8 control passes) rather than integrity, and that a Linux rerun of the unchanged 40-flow protocol flipped one LIME control verdict because XGBoost differs slightly across platforms. The protocol was strengthened accordingly:
+
+- Hyperparameters (8-candidate grid per model) and the ablation feature count are chosen on a stratified 15% validation split of the training data; the test partition is used only for reporting.
+- Explanations cover 200 fixed flows per configuration under all five model seeds (previously 40 flows, seed 42 only).
+- A global-importance control tests whether each per-alert ranking beats the model's own fixed feature-importance ranking.
+- Faithfulness correlation (Bhatt et al., IJCAI 2020) scores the whole attribution vector, not only its top features.
+- A label-randomization sanity check (Adebayo et al., 2018) confirms explanations depend on what the model learned.
+- Masking-reference and LIME-budget audits use 100 and 20 flows (previously 12 and 6); isotonic recalibration and an interventional-TreeSHAP background ablation were added.
+- A label-conflict audit shows that most UNSW Analysis and Backdoor test rows share exact feature vectors with differently labelled rows, which bounds achievable multiclass accuracy.
+- The paper is regenerated from source with every number computed from output files, and positioned against the closest prior work (Arreche et al., E-XAI, IEEE Access 2024).
+
 
 - Added explicit within-partition deduplication and cross-partition feature-overlap removal for UNSW-NB15, with counts written to the run manifest.
 - Replaced the unsupported description of the UNSW split as “temporal” with “predefined.”
@@ -33,13 +45,15 @@ The strongest publication-critical defect found during this audit was data leaka
 Mean macro-F1 over five seeds:
 
 | Dataset | Task | Random Forest | XGBoost |
-|---|---:|---:|---:|
-| CIC-IDS2017 | Binary | 0.9965 | 0.9974 |
-| CIC-IDS2017 | Multiclass | 0.9254 | 0.9324 |
-| UNSW-NB15 (cleaned) | Binary | 0.8013 | 0.8156 |
-| UNSW-NB15 (cleaned) | Multiclass | 0.5140 | 0.5083 |
+|---|---|---:|---:|
+| CIC-IDS2017 | Binary | 0.9975 | 0.9977 |
+| CIC-IDS2017 | Multiclass | 0.9299 | 0.9334 |
+| UNSW-NB15 (cleaned) | Binary | 0.8148 | 0.8201 |
+| UNSW-NB15 (cleaned) | Multiclass | 0.5323 | 0.5292 |
 
-TreeSHAP produced higher paired top-5 deletion fidelity than LIME in all 8 configurations. Every bootstrap confidence interval for the paired difference was above zero; Holm-adjusted one-sided Wilcoxon p-values were at most 0.00319, and paired effect sizes ranged from 0.382 to 0.974. TreeSHAP beat the random-ranking control in 8/8 configurations. LIME did so in 7/8; the failed case was CIC-IDS2017 binary Random Forest (mean lift 0.01393, Holm-adjusted p = 0.33763).
+Hyperparameters and feature counts are chosen on a training-only validation split; the test partition is never used for selection.
+
+TreeSHAP and LIME explain the same 200 test flows per configuration under all five model seeds. TreeSHAP had higher paired deletion fidelity (mean of k = 1, 3, 5, 10) than LIME in all 8 dataset/task/model configurations (differences 0.087-0.187; Holm-adjusted one-sided Wilcoxon p <= 8.8e-17) and higher faithfulness correlation in all 8 (differences 0.248-0.351). TreeSHAP beat random rankings in 8/8 configurations and the model's own global-importance ranking in 8/8. LIME beat random rankings in 7/8 (failing for CIC-IDS2017 binary XGBoost) but the global ranking in only 3/8, so in most settings LIME's per-alert ranking adds little beyond a fixed importance list.
 
 These results support a bounded conclusion: in this experimental protocol, TreeSHAP rankings are more faithful and more consistently distinguishable from random rankings than LIME rankings. They do not prove that either explanation is causal, universally valid, or sufficient for autonomous security decisions.
 
@@ -80,7 +94,8 @@ The research artifacts are internally consistent, but the manuscript should not 
 
 - Final manuscript: `output/pdf/xai_ids_ieee_paper.pdf`
 - Reproducible learning notebook: `PROJECT_WALKTHROUGH.ipynb`
-- Complete beginner-to-end explanation: `PROJECT_HANDBOOK.md`
+- Complete beginner-to-end explanation: `HOW_THE_PROJECT_WAS_DONE.md`
+- Colab runner: `COLAB_RUN.ipynb`
 - Literature-to-experiment traceability: `LITERATURE_REQUIREMENTS_TRACEABILITY.md`
 - Machine-readable experiment outputs: `outputs/`
 - Integrity verifier: `verify_outputs.py`
