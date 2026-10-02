@@ -12,8 +12,10 @@ import pandas as pd
 import shap
 import yaml
 from matplotlib import pyplot as plt
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss, f1_score
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils.class_weight import compute_sample_weight
 
 from .benchmark import (
     TabularPreprocessor,
@@ -26,6 +28,7 @@ from .benchmark import (
     predictive_metrics,
     prepare_dataset,
     safe_cosine,
+    split_validation,
     stratified_indices,
 )
 from .transparency import _ranking_score
@@ -36,6 +39,17 @@ matplotlib.use("Agg")
 def _artifact_path(output_dir: Path, dataset: str, task: str, model_name: str) -> Path:
     name = f"{dataset}_{task}_{model_name}".replace("-", "_")
     return output_dir / "models" / f"{name}.joblib"
+
+
+def expected_calibration_error(probability: np.ndarray, target: np.ndarray, bins: int = 10) -> float:
+    edges = np.linspace(0, 1, bins + 1)
+    assigned = np.clip(np.digitize(probability, edges[1:-1]), 0, bins - 1)
+    gap = 0.0
+    for bin_index in range(bins):
+        mask = assigned == bin_index
+        if np.any(mask):
+            gap += mask.sum() * abs(probability[mask].mean() - target[mask].mean())
+    return float(gap / len(target))
 
 
 def _calibration_rows(
@@ -53,7 +67,6 @@ def _calibration_rows(
     edges = np.linspace(0, 1, bins + 1)
     assigned = np.clip(np.digitize(probability, edges[1:-1]), 0, bins - 1)
     rows = []
-    weighted_gap = 0.0
     for bin_index in range(bins):
         mask = assigned == bin_index
         if not np.any(mask):
@@ -61,7 +74,6 @@ def _calibration_rows(
         mean_probability = float(probability[mask].mean())
         observed_frequency = float(target[mask].mean())
         count = int(mask.sum())
-        weighted_gap += count * abs(mean_probability - observed_frequency)
         rows.append(
             {
                 "dataset": dataset,
@@ -76,9 +88,199 @@ def _calibration_rows(
         "dataset": dataset,
         "model": model_name,
         "brier_score": float(brier_score_loss(target, probability)),
-        "expected_calibration_error": float(weighted_gap / len(target)),
+        "expected_calibration_error": expected_calibration_error(probability, target, bins),
     }
     return rows, summary
+
+
+def _fit(model_name: str, params: dict, x: np.ndarray, y: np.ndarray, seed: int, n_classes: int):
+    model = make_model(model_name, params, seed, n_classes)
+    weight = compute_sample_weight("balanced", y) if model_name == "xgboost" else None
+    return model.fit(x, y, sample_weight=weight)
+
+
+def label_conflict_rows(frame: pd.DataFrame, feature_columns: list[str], target: str):
+    """Share of each class whose exact feature vector also carries another label.
+
+    Such rows are not separable by any model using these features, so the
+    majority label per identical-feature group bounds achievable accuracy.
+    """
+    keys = pd.util.hash_pandas_object(frame[feature_columns], index=False).to_numpy()
+    groups = frame.assign(_key=keys).groupby("_key")[target]
+    conflicting = groups.transform("nunique").to_numpy() > 1
+    labels = frame[target].to_numpy()
+    rows = []
+    for label in sorted(pd.unique(labels)):
+        mask = labels == label
+        rows.append(
+            {
+                "class": str(label),
+                "rows": int(mask.sum()),
+                "conflicting_share": float(conflicting[mask].mean()),
+            }
+        )
+    ceiling = float(groups.agg(lambda s: s.value_counts().iloc[0]).sum() / len(frame))
+    return rows, ceiling
+
+
+def _recalibration_rows(
+    dataset: str,
+    model_name: str,
+    params: dict,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    classes: list[str],
+    seed: int,
+    validation_size: float,
+) -> dict:
+    """Raw versus isotonic-recalibrated attack probability, fitted on validation only."""
+    attack_index = classes.index("Attack")
+    fit_idx, val_idx = split_validation(y_train, validation_size, seed)
+    model = _fit(model_name, params, x_train[fit_idx], y_train[fit_idx], seed, len(classes))
+    calibrator = IsotonicRegression(out_of_bounds="clip").fit(
+        model.predict_proba(x_train[val_idx])[:, attack_index],
+        (y_train[val_idx] == attack_index).astype(float),
+    )
+    raw = model.predict_proba(x_test)[:, attack_index]
+    calibrated = calibrator.predict(raw)
+    target = (y_test == attack_index).astype(float)
+    return {
+        "dataset": dataset,
+        "model": model_name,
+        "ece_raw": expected_calibration_error(raw, target),
+        "ece_isotonic": expected_calibration_error(calibrated, target),
+        "brier_raw": float(brier_score_loss(target, raw)),
+        "brier_isotonic": float(brier_score_loss(target, calibrated)),
+    }
+
+
+def _shap_background_rows(
+    dataset: str,
+    task: str,
+    model_name: str,
+    model,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    indices: np.ndarray,
+    preprocessor: TabularPreprocessor,
+    seed: int,
+    background_size: int = 100,
+) -> list[dict]:
+    """Path-dependent versus interventional TreeSHAP deletion on the same flows.
+
+    Path-dependent TreeSHAP follows the training distribution in the trees
+    ("true to the data"); interventional TreeSHAP uses an explicit background
+    sample ("true to the model", Chen et al., 2020).
+    """
+    background = x_train[stratified_indices(y_train, min(background_size, len(x_train)), seed)]
+    explainers = {
+        "path_dependent": shap.TreeExplainer(model),
+        "interventional": shap.TreeExplainer(
+            model, data=background, feature_perturbation="interventional"
+        ),
+    }
+    baseline = np.asarray(preprocessor.baseline_, dtype=float)
+    rows = []
+    for source_index in indices:
+        row = x_test[int(source_index)]
+        predicted_class = int(model.predict(row.reshape(1, -1))[0])
+        for mode, explainer in explainers.items():
+            vector = extract_shap_vector(
+                explainer(row.reshape(1, -1), check_additivity=False), predicted_class
+            )
+            score, _ = _ranking_score(
+                model, row, predicted_class, baseline, np.argsort(-np.abs(vector)), [1, 3, 5, 10]
+            )
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "task": task,
+                    "model": model_name,
+                    "source_test_index": int(source_index),
+                    "shap_mode": mode,
+                    "deletion_score": score,
+                }
+            )
+    return rows
+
+
+def _randomization_rows(
+    dataset: str,
+    task: str,
+    model_name: str,
+    params: dict,
+    model,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    indices: np.ndarray,
+    preprocessor: TabularPreprocessor,
+    classes: list[str],
+    seed: int,
+    lime_samples: int,
+) -> list[dict]:
+    """Data-randomization sanity check (Adebayo et al., 2018).
+
+    A model trained on permuted labels has learned nothing about attacks. If an
+    explainer gives it explanations similar to the real model's, the explainer
+    reflects the input data rather than the learned decision function.
+    """
+    permuted_labels = np.random.default_rng(seed).permutation(y_train)
+    permuted = _fit(model_name, params, x_train, permuted_labels, seed, len(classes))
+    models = {"real": model, "permuted": permuted}
+    tree_explainers = {name: shap.TreeExplainer(m) for name, m in models.items()}
+    lime_explainers = {
+        name: make_lime_explainer(
+            x_train[stratified_indices(m.predict(x_train), min(5000, len(x_train)), seed)],
+            preprocessor,
+            classes,
+            seed,
+        )
+        for name, m in models.items()
+    }
+    rows = []
+    for source_index in indices:
+        row = x_test[int(source_index)]
+        predicted = {name: int(m.predict(row.reshape(1, -1))[0]) for name, m in models.items()}
+        vectors = {
+            "TreeSHAP": {
+                name: extract_shap_vector(
+                    tree_explainers[name](row.reshape(1, -1), check_additivity=False),
+                    predicted[name],
+                )
+                for name in models
+            },
+            "LIME": {
+                name: explain_lime(
+                    lime_explainers[name],
+                    row,
+                    models[name].predict_proba,
+                    predicted[name],
+                    len(row),
+                    lime_samples,
+                )
+                for name in models
+            },
+        }
+        for explainer, pair in vectors.items():
+            top_real = set(np.argsort(-np.abs(pair["real"]))[:5])
+            top_permuted = set(np.argsort(-np.abs(pair["permuted"]))[:5])
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "task": task,
+                    "model": model_name,
+                    "explainer": explainer,
+                    "source_test_index": int(source_index),
+                    "cosine_real_vs_permuted": safe_cosine(pair["real"], pair["permuted"]),
+                    "top5_jaccard_real_vs_permuted": len(top_real & top_permuted)
+                    / max(1, len(top_real | top_permuted)),
+                }
+            )
+    return rows
 
 
 def _masking_baseline_rows(
@@ -328,6 +530,14 @@ def run(config_path: Path) -> None:
     calibration_summaries = []
     masking_rows = []
     lime_rows = []
+    recalibration = []
+    background_rows = []
+    conflict_rows = []
+    randomization_rows = []
+    evaluation = config["evaluation"]
+    audit_n = int(evaluation.get("audit_samples", 12))
+    lime_budget_n = int(evaluation.get("lime_budget_samples", 6))
+    validation_size = float(config["tuning"]["validation_size"])
 
     for dataset in ("CIC-IDS2017", "UNSW-NB15"):
         for task in ("binary", "multiclass"):
@@ -338,6 +548,16 @@ def run(config_path: Path) -> None:
             preprocessor: TabularPreprocessor = first_artifact["preprocessor"]
             x_train = preprocessor.transform(train)
             x_test = preprocessor.transform(test)
+
+            for partition, frame, labels in (("train", train, y_train), ("test", test, y_test)):
+                rows, ceiling = label_conflict_rows(
+                    frame.assign(_target=np.asarray(classes)[labels]), feature_names, "_target"
+                )
+                conflict_rows.extend(
+                    {"dataset": dataset, "task": task, "partition": partition,
+                     **row, "accuracy_ceiling": ceiling}
+                    for row in rows
+                )
 
             class_distribution = np.bincount(y_train, minlength=len(classes)) / len(y_train)
             majority = int(np.argmax(class_distribution))
@@ -357,14 +577,39 @@ def run(config_path: Path) -> None:
                 print(f"[audit] {dataset} / {task} / {model_name}", flush=True)
                 artifact = joblib.load(_artifact_path(output_dir, dataset, task, model_name))
                 model = artifact["model"]
+                params = manifest["selected_hyperparameters"][f"{dataset}/{task}/{model_name}"]
                 if task == "binary":
                     rows, summary = _calibration_rows(dataset, model_name, model, x_test, y_test, classes)
                     calibration_rows.extend(rows)
                     calibration_summaries.append(summary)
+                    recalibration.append(
+                        _recalibration_rows(
+                            dataset, model_name, params, x_train, y_train, x_test, y_test,
+                            classes, seed, validation_size,
+                        )
+                    )
+                audit_indices = explanation_indices(
+                    y_test, model.predict(x_test).astype(int), min(audit_n, len(y_test)), seed
+                )
+                # Interventional TreeSHAP is tractable for the depth-limited
+                # boosted trees but not for the deep random forests.
+                if model_name == "xgboost":
+                    background_rows.extend(
+                        _shap_background_rows(
+                            dataset, task, model_name, model, x_train, y_train, x_test,
+                            audit_indices, preprocessor, seed,
+                        )
+                    )
+                randomization_rows.extend(
+                    _randomization_rows(
+                        dataset, task, model_name, params, model, x_train, y_train, x_test,
+                        audit_indices, preprocessor, classes, seed,
+                        int(evaluation["lime_samples"]),
+                    )
+                )
 
                 # Hold the stochastic seed fixed so this ablation changes only
                 # the weighting treatment rather than weighting and RNG state.
-                params = manifest["selected_hyperparameters"][f"{dataset}/{task}/{model_name}"]
                 unweighted = make_model(model_name, params, seed, len(classes))
                 if model_name == "random_forest":
                     unweighted.set_params(class_weight=None)
@@ -394,12 +639,14 @@ def run(config_path: Path) -> None:
 
                 masking_rows.extend(
                     _masking_baseline_rows(
-                        dataset, task, model_name, model, x_train, x_test, y_test, preprocessor, seed
+                        dataset, task, model_name, model, x_train, x_test, y_test, preprocessor, seed,
+                        n=audit_n,
                     )
                 )
                 lime_rows.extend(
                     _lime_budget_rows(
-                        dataset, task, model_name, model, x_train, x_test, y_test, preprocessor, classes, seed
+                        dataset, task, model_name, model, x_train, x_test, y_test, preprocessor, classes, seed,
+                        n=lime_budget_n,
                     )
                 )
 
@@ -409,6 +656,10 @@ def run(config_path: Path) -> None:
     pd.DataFrame(calibration_summaries).to_csv(extended_dir / "calibration_summary.csv", index=False)
     pd.DataFrame(masking_rows).to_csv(extended_dir / "masking_baseline_ablation.csv", index=False)
     pd.DataFrame(lime_rows).to_csv(extended_dir / "lime_budget_ablation.csv", index=False)
+    pd.DataFrame(recalibration).to_csv(extended_dir / "recalibration.csv", index=False)
+    pd.DataFrame(background_rows).to_csv(extended_dir / "shap_background_ablation.csv", index=False)
+    pd.DataFrame(conflict_rows).to_csv(extended_dir / "label_conflicts.csv", index=False)
+    pd.DataFrame(randomization_rows).to_csv(extended_dir / "randomization_sanity.csv", index=False)
     _summarize_existing_outputs(output_dir, extended_dir)
 
     all_controls = pd.read_csv(output_dir / "fidelity_control_tests.csv")
@@ -420,7 +671,7 @@ def run(config_path: Path) -> None:
             ("Modern dual-dataset evaluation", "complete", "CIC-IDS2017 and official UNSW-NB15 split"),
             ("Binary and multiclass tasks", "complete", "Both tasks on both datasets"),
             ("Simple predictive baselines", "complete", "Majority and depth-5 decision tree"),
-            ("Five predictive seeds", "complete", "Seeds 42, 52, 62, 72, and 82"),
+            ("Five predictive seeds", "complete", "Seeds 42, 52, 62, 72, and 82 for prediction and explanation"),
             ("Leakage-safe preprocessing", "complete", "Training-only medians and category dictionaries"),
             ("Random and bottom fidelity controls", "complete", "Paired deletion controls with Holm correction"),
             ("Alternative masking baselines", "complete", "Median/mode, zero, marginal row, and nearest same/opposite predictions"),
@@ -428,6 +679,13 @@ def run(config_path: Path) -> None:
             ("Explanation by class and error type", "complete", "Class and TP/FP/TN/FN summaries"),
             ("Stability distributions", "complete", "Q10, median, and Q90 for cosine and top-5 overlap"),
             ("Probability calibration audit", "complete", "Brier score, ECE, and reliability curves"),
+            ("Probability recalibration", "complete", "Isotonic recalibration fitted on a training-only validation split"),
+            ("SHAP background ablation", "complete", "Path-dependent versus interventional TreeSHAP (100-row background) for XGBoost"),
+            ("Validation-based selection", "complete", "Hyperparameters and feature count chosen on a training-only validation split"),
+            ("Global-importance control", "complete", "Top-ranked deletion tested against the model's own global feature ranking"),
+            ("Faithfulness correlation", "complete", "Correlation between attribution mass and masking effect on random feature subsets"),
+            ("Explanation sanity check", "complete", "Data-randomization test against a model trained on permuted labels"),
+            ("Label-conflict separability audit", "complete", "Share of rows whose exact feature vector carries another label, with accuracy ceiling"),
             ("Balancing sensitivity", "partial", "Class weighting versus none; SMOTE omitted to avoid synthetic categorical flows"),
             ("Human analyst usefulness", "future work", "Requires ethics-approved task-based user study"),
             ("Causal explanation", "out of scope", "Post-hoc model evidence cannot establish network causality"),

@@ -287,5 +287,50 @@ class TransparencyContextTests(unittest.TestCase):
         self.assertAlmostEqual(context["global_top_minus_random_lift"], 0.2)
 
 
+class ExtendedAuditTests(unittest.TestCase):
+    def test_expected_calibration_error_is_zero_for_perfect_bins(self):
+        from src.xai_ids.extended_audit import expected_calibration_error
+
+        probability = np.array([0.2] * 5 + [0.8] * 5)
+        target = np.array([1, 0, 0, 0, 0, 1, 1, 1, 1, 0], dtype=float)
+        self.assertAlmostEqual(expected_calibration_error(probability, target), 0.0)
+        self.assertAlmostEqual(expected_calibration_error(np.ones(4), np.zeros(4)), 1.0)
+
+    def test_label_conflict_audit_counts_conflicting_feature_groups(self):
+        from src.xai_ids.extended_audit import label_conflict_rows
+
+        frame = pd.DataFrame(
+            {"a": [1, 1, 2, 3], "b": ["x", "x", "y", "z"],
+             "target": ["DoS", "Exploits", "Normal", "Normal"]}
+        )
+        rows, ceiling = label_conflict_rows(frame, ["a", "b"], "target")
+        by_class = {row["class"]: row["conflicting_share"] for row in rows}
+        self.assertEqual(by_class["DoS"], 1.0)
+        self.assertEqual(by_class["Normal"], 0.0)
+        self.assertAlmostEqual(ceiling, 0.75)
+
+    def test_randomization_sanity_separates_real_and_permuted_models(self):
+        from sklearn.ensemble import RandomForestClassifier
+
+        from src.xai_ids.extended_audit import _randomization_rows
+
+        rng = np.random.default_rng(5)
+        x = rng.normal(size=(600, 6))
+        y = (x[:, 0] - x[:, 1] > 0).astype(int)
+        names = [f"f{i}" for i in range(6)]
+        pre = TabularPreprocessor(names).fit(pd.DataFrame(x[:500], columns=names))
+        real = RandomForestClassifier(n_estimators=30, random_state=42).fit(x[:500], y[:500])
+        rows = _randomization_rows(
+            "D", "binary", "random_forest",
+            {"n_estimators": 30, "max_depth": None},
+            real, x[:500], y[:500], x[500:], np.arange(20), pre,
+            ["Attack", "Normal"], 42, lime_samples=100,
+        )
+        frame = pd.DataFrame(rows)
+        self.assertEqual(set(frame.explainer), {"TreeSHAP", "LIME"})
+        tree = frame[frame.explainer.eq("TreeSHAP")]
+        self.assertLess(tree.top5_jaccard_real_vs_permuted.mean(), 0.8)
+
+
 if __name__ == "__main__":
     unittest.main()
